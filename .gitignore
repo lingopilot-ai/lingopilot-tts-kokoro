@@ -1,0 +1,14 @@
+/target/
+/build-target/
+/dist/
+*.pdb
+*.exe
+*.dll
+*.so
+*.dylib
+.env
+.vscode/
+.idea/
+docs/
+AGENTS.md
+BACKLOG.md

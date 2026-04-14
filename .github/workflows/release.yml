@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows-release:
+    name: Windows release artifact
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate tag against Cargo.toml
+        shell: pwsh
+        run: .\scripts\Assert-ReleaseTagMatchesVersion.ps1 -Tag "${{ github.ref_name }}"
+
+      - name: Assert forbidden crates are absent from Cargo.lock
+        shell: pwsh
+        run: .\scripts\Assert-ForbiddenCargoLockCrates.ps1
+
+      - name: Build release binary
+        shell: pwsh
+        run: cargo build --release --locked
+
+      - name: Stage release assets
+        shell: pwsh
+        env:
+          LINGOPILOT_TTS_RELEASE_KOKORO_MODEL_URL: ${{ secrets.LINGOPILOT_TTS_RELEASE_KOKORO_MODEL_URL }}
+          LINGOPILOT_TTS_RELEASE_ONNXRUNTIME_URL: ${{ secrets.LINGOPILOT_TTS_RELEASE_ONNXRUNTIME_URL }}
+          LINGOPILOT_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL: ${{ vars.LINGOPILOT_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL }}
+        run: .\scripts\Stage-WindowsReleaseAssets.ps1 -Version "${{ github.ref_name }}"
+
+      - name: Package Windows release archive
+        shell: pwsh
+        run: .\scripts\Package-WindowsRelease.ps1 -Version "${{ github.ref_name }}"
+
+      - name: Smoke test packaged release archive
+        shell: pwsh
+        run: .\scripts\Test-WindowsReleaseArchive.ps1 -ZipPath "dist\lingopilot-tts-kokoro-${{ github.ref_name }}-windows-x86_64.zip"
+
+      - name: Publish GitHub Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          files: |
+            dist/lingopilot-tts-kokoro-${{ github.ref_name }}-windows-x86_64.zip
+            dist/lingopilot-tts-kokoro-${{ github.ref_name }}-sha256.txt

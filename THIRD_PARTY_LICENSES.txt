@@ -1,0 +1,19 @@
+lingopilot-tts-kokoro release bundles include third-party software and runtime assets.
+
+1. Kokoro model and related runtime assets
+License: Apache License 2.0
+Upstream: https://github.com/hexgrad/kokoro
+
+2. ONNX Runtime
+License: MIT License
+Upstream: https://github.com/microsoft/onnxruntime
+
+3. ort Rust crate
+License: MIT OR Apache-2.0
+Upstream: https://github.com/pykeio/ort
+
+4. eSpeak-NG runtime shared library
+License: GNU General Public License v3.0
+Upstream: https://github.com/espeak-ng/espeak-ng
+
+This sidecar does not link eSpeak-NG at build time. It loads the eSpeak-NG shared library at runtime from the directory passed through `--espeak-data-dir`. Users who receive `espeak-ng.dll` in a packaged release may obtain the corresponding source code from the upstream eSpeak-NG project.
