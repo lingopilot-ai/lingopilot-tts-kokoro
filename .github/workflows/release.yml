@@ -9,9 +9,17 @@ permissions:
   contents: write
 
 jobs:
-  windows-release:
-    name: Windows release artifact
-    runs-on: windows-latest
+  release-artifact:
+    name: ${{ matrix.label }} release artifact
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x86_64
+            os: windows-latest
+            package_script: .\scripts\Package-WindowsRelease.ps1
+            archive_suffix: windows-x86_64.zip
 
     steps:
       - name: Check out repository
@@ -44,9 +52,9 @@ jobs:
           KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL: ${{ vars.KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL }}
         run: .\scripts\Stage-WindowsReleaseAssets.ps1 -Version "${{ github.ref_name }}"
 
-      - name: Package Windows release archive
+      - name: Package release archive
         shell: pwsh
-        run: .\scripts\Package-WindowsRelease.ps1 -Version "${{ github.ref_name }}"
+        run: & "${{ matrix.package_script }}" -Version "${{ github.ref_name }}"
 
       - name: Run packaged readiness verification
         shell: pwsh
@@ -57,7 +65,7 @@ jobs:
         with:
           fail_on_unmatched_files: true
           files: |
-            dist/lingopilot-tts-kokoro-${{ github.ref_name }}-windows-x86_64.zip
+            dist/lingopilot-tts-kokoro-${{ github.ref_name }}-${{ matrix.archive_suffix }}
             dist/lingopilot-tts-kokoro-${{ github.ref_name }}-sha256.txt
 
       - name: Verify published release assets
