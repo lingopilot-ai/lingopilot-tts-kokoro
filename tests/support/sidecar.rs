@@ -7,6 +7,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+const PRIMARY_LOG_ENV: &str = "KOKORO_TTS_LOG";
+const LEGACY_LOG_ENV: &str = "LINGOPILOT_TTS_LOG";
+
 pub struct SidecarHarness {
     child: Child,
     stdout: BufReader<ChildStdout>,
@@ -21,7 +24,7 @@ impl SidecarHarness {
     ) -> Self {
         let mut command = sidecar_command();
         if let Some(level) = level {
-            command.env("LINGOPILOT_TTS_LOG", level);
+            command.env(PRIMARY_LOG_ENV, level);
         }
         for (key, value) in extra_env {
             command.env(key, value);
@@ -104,7 +107,11 @@ impl SidecarHarness {
     pub fn wait_for_exit(&mut self, timeout: Duration) -> Option<i32> {
         let deadline = Instant::now() + timeout;
         loop {
-            match self.child.try_wait().expect("process status should be readable") {
+            match self
+                .child
+                .try_wait()
+                .expect("process status should be readable")
+            {
                 Some(status) => return status.code(),
                 None if Instant::now() >= deadline => return None,
                 None => thread::sleep(Duration::from_millis(20)),
@@ -153,7 +160,8 @@ pub fn unique_missing_path(prefix: &str) -> PathBuf {
 fn sidecar_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_lingopilot-tts-kokoro"));
     command
-        .env_remove("LINGOPILOT_TTS_LOG")
+        .env_remove(PRIMARY_LOG_ENV)
+        .env_remove(LEGACY_LOG_ENV)
         .env_remove("ORT_DYLIB_PATH")
         .env_remove("RUST_LOG")
         .stdin(Stdio::piped())

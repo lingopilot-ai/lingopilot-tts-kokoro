@@ -1,6 +1,6 @@
 # lingopilot-tts-kokoro
 
-A local TTS sidecar for Kokoro-based synthesis. It runs as a long-lived child process, reads newline-delimited JSON requests from `stdin`, writes JSON headers to `stdout`, and writes raw PCM16 audio bytes immediately after each successful `audio` response.
+`lingopilot-tts-kokoro` is a local Kokoro TTS sidecar. It runs as a long-lived child process, reads one newline-delimited JSON request per line from `stdin`, writes one newline-delimited JSON response to `stdout`, and writes raw PCM16 audio bytes immediately after each successful `audio` response.
 
 `README.md` is the canonical public contract for this repository. If the implementation and this document disagree, treat that as a defect.
 
@@ -11,50 +11,52 @@ Current repository state: `NOT READY`
 What works now:
 
 - startup validation with `--espeak-data-dir`
-- one `ready` JSON header on successful startup
+- exactly one `ready` JSON header on successful startup
 - strict newline-delimited request parsing
-- request validation and error classification
+- request validation and deterministic error classification
 - deterministic Kokoro bundle validation inside `model_dir`
-- deterministic Kokoro voice-prefix validation
+- deterministic Kokoro voice-family validation
 - real Kokoro ONNX inference and PCM16 output for supported requests
 - real English phonemization for `af_*` / `am_*` / `bf_*` / `bm_*`
-- deterministic eSpeak-first phonemization fallback for `ef_*` / `em_*`, `ff_*`, `hf_*` / `hm_*`, `if_*` / `im_*`, and `pf_*` / `pm_*`
+- deterministic eSpeak-backed phonemization for `ef_*` / `em_*`, `ff_*`, `hf_*` / `hm_*`, `if_*` / `im_*`, and `pf_*` / `pm_*`
 - stderr-only observability logs
 
 What does not work yet:
 
-- Japanese and Mandarin phonemization (`jf_*` / `jm_*`, `zf_*` / `zm_*`)
-- release packaging with validated Kokoro assets
+- Japanese and Mandarin synthesis for `jf_*` / `jm_*` and `zf_*` / `zm_*` is intentionally deferred for `v0.1.0`
+- release packaging has not been revalidated with real Kokoro assets in CI
+- a first published GitHub Release has not been smoke-tested end to end
 
 This repository is pre-release. The public protocol is stable enough to test, but the release gates in this README are not fully closed yet.
 
 ## Overview
 
-This repository is designed for applications that want a local, offline TTS worker with a strict pipe protocol:
+This project is for applications that need a local, offline TTS worker with a strict pipe protocol:
 
 - one long-lived child process
 - JSON request headers on `stdin`
 - JSON response headers on `stdout`
-- raw PCM bytes after `audio`
+- raw PCM bytes immediately after `audio`
 - clean shutdown on `stdin` close
+- no request-time network dependency
 
 Kokoro-specific constraints:
 
-- Kokoro voice selection is not file-per-voice; voices live inside a bundle such as `voices-v1.0.bin`
-- Kokoro uses language-specific voice families such as `af_*`, `bf_*`, `jf_*`, `pf_*`
+- Kokoro voice selection is bundle-based rather than file-per-voice
+- Kokoro voice IDs encode language-family prefixes such as `af_*`, `bf_*`, `jf_*`, and `pf_*`
 - Kokoro requires a text-to-phoneme path before ONNX inference
-- The official Kokoro stack depends on `misaki`, and several language paths still depend on eSpeak fallback behavior
+- several supported non-English paths currently depend on eSpeak-backed phonemization
 
 ## Runtime Model
 
 This repository uses a native Rust sidecar plus a Rust-integrated Kokoro backend.
 
-- it keeps one process boundary for protocol ownership
-- it keeps the request path offline and self-contained
-- it packages cleanly as a single executable plus runtime assets
-- it avoids request-time dependence on Python or network services
+- the process boundary owns the protocol lifecycle
+- synthesis stays local and self-contained at request time
+- packaging stays within one executable plus runtime assets
+- the runtime does not depend on Python services or network calls during synthesis
 
-## Current Request Contract
+## Protocol Contract
 
 ### Startup
 
@@ -138,13 +140,14 @@ Still unsupported at synthesis time:
 - Japanese: `jf_*`, `jm_*`
 - Mandarin Chinese: `zf_*`, `zm_*`
 
-Those unsupported families still fail explicitly with an `error` response instead of silently falling back to another path.
+For `v0.1.0`, this is an explicit product decision rather than an implementation accident. Those families fail explicitly with an `error` response instead of silently falling back to another path. Hosts must route `ja` and `zh_CN` to `lingopilot-tts-piper` or another non-Kokoro engine; this sidecar does not perform an internal fallback.
 
 ## Runtime Characteristics
 
 These characteristics are part of the public contract:
 
 - License posture: this repository is Apache-2.0. It must not add `espeak-rs-sys`, `espeak-rs`, or `piper-rs` to `Cargo.lock`. eSpeak-NG is loaded at runtime through `libloading`.
+- Log level selection: `KOKORO_TTS_LOG` is the primary log-level environment variable. `LINGOPILOT_TTS_LOG` remains a temporary compatibility alias, and `RUST_LOG` remains the final fallback.
 - Voice resolution: the request `voice` selects an entry inside one shared `voices*.bin` bundle; the model directory must contain exactly one `*.onnx` and exactly one `voices*.bin`.
 - Speed range: supported request values are `0.5` to `2.0`.
 - Sample rate: successful Kokoro responses currently report `24000`.
@@ -167,7 +170,21 @@ The sidecar currently infers `lang_code` from the official Kokoro voice prefixes
 | `if_`, `im_` | Italian |
 | `pf_`, `pm_` | Brazilian Portuguese |
 
-## Windows Packaging
+## Differences From `lingopilot-tts-piper`
+
+This sidecar keeps the same general sidecar family shape where possible, but several Kokoro-specific differences are intentional:
+
+| Area | `lingopilot-tts-piper` | `lingopilot-tts-kokoro` |
+|------|------------------------|--------------------------|
+| Binary license | GPL-3.0-only | Apache-2.0; eSpeak is runtime-loaded through `libloading` |
+| `voice` resolution | per-voice `.onnx` plus sidecar metadata files | one shared `.onnx` plus one shared `voices*.bin` bundle |
+| `speed` range | `0.5` to `5.5` | `0.5` to `2.0` |
+| Sample rate | voice-dependent, typically `22050` | fixed `24000` |
+| `model_dir` layout | flat per-voice model layout | exactly one `*.onnx` and one `voices*.bin` |
+| eSpeak runtime env var | `PIPER_ESPEAKNG_DATA_DIRECTORY` | none; runtime path is selected at startup with `--espeak-data-dir` |
+| eSpeak linkage | build-time linked eSpeak bindings | runtime-loaded `espeak-ng.dll` |
+
+## Windows Packaging And Host Integration
 
 The canonical Windows release is one extracted package root with this layout:
 
@@ -197,7 +214,7 @@ Packaging rules:
 - The sidecar does not implicitly search for `kokoro-model/` relative to the executable.
 - `ORT_DYLIB_PATH` remains a supported override for development and live tests, but the packaged release path is the sibling `onnxruntime.dll`.
 
-Applications should compute `model_dir` from the extracted package root and pass that absolute path in each request. Example:
+A host application should compute `model_dir` from the extracted package root and pass that absolute path in each request. Example:
 
 ```powershell
 $packageRoot = "C:\absolute\path\to\lingopilot-tts-kokoro-v0.1.0-windows-x86_64"
@@ -212,11 +229,11 @@ $modelDir = Join-Path $packageRoot "kokoro-model"
 Run:
 
 ```bash
-cargo check
-cargo test
+cargo check --locked
+cargo test --locked
 ```
 
-`cargo test` is the default deterministic suite. It does not require real Kokoro assets and remains suitable for CI.
+`cargo test --locked` is the default deterministic suite. It does not require real Kokoro assets and remains suitable for CI.
 
 The default automated suite covers:
 
@@ -236,22 +253,34 @@ The default automated suite covers:
 - graceful shutdown after `stdin` closes
 - error responses that never leak PCM bytes onto `stdout`
 
-Opt-in ignored live tests cover every scenario that needs a real Kokoro bundle or actual PCM output:
+## Live Assets And Packaging Helpers
+
+Opt-in ignored live tests in `tests/live_assets.rs` cover every Sprint 6 scenario that needs a real Kokoro bundle or actual PCM output:
 
 - invalid voice against a real `model_dir`
-- one successful English synthesis request
-- one successful non-English eSpeak-backed synthesis request
-- repeated same-process synthesis with exact PCM byte counts
-- stdout/stderr separation during successful synthesis
-- direct backend synthesis for one English and one non-English supported family
+- American English synthesis with `af_*`
+- British English synthesis with `bf_*`
+- Spanish synthesis with `ef_*`
+- French synthesis with `ff_*`
+- Hindi synthesis with `hf_*`
+- Italian synthesis with `if_*`
+- Brazilian Portuguese synthesis with `pf_*`
+- repeated same-process synthesis with exact PCM byte counts and stderr/stdout separation
+- runtime cache-hit logging on a repeated same-voice request
+- `speed` changing `byte_length`
+- `model_dir` succeeding under a Windows path with spaces and non-ASCII characters
 
 Provide these absolute paths through environment variables:
 
 ```powershell
-$env:LINGOPILOT_TTS_LIVE_ESPEAK_RUNTIME_DIR = "C:\absolute\path\to\espeak-runtime"
-$env:LINGOPILOT_TTS_LIVE_MODEL_DIR = "C:\absolute\path\to\kokoro-model-dir"
-$env:LINGOPILOT_TTS_LIVE_ONNXRUNTIME_DLL = "C:\absolute\path\to\onnxruntime.dll"
+$env:KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR = "C:\absolute\path\to\espeak-runtime"
+$env:KOKORO_TTS_LIVE_MODEL_DIR = "C:\absolute\path\to\kokoro-model-dir"
+$env:KOKORO_TTS_LIVE_ONNXRUNTIME_DLL = "C:\absolute\path\to\onnxruntime.dll"
 ```
+
+Temporary compatibility aliases remain accepted during the neutrality transition:
+`LINGOPILOT_TTS_LIVE_ESPEAK_RUNTIME_DIR`, `LINGOPILOT_TTS_LIVE_MODEL_DIR`, and
+`LINGOPILOT_TTS_LIVE_ONNXRUNTIME_DLL`.
 
 Recommended Windows command:
 
@@ -267,23 +296,67 @@ cargo test --locked -- --ignored
 
 The helper script validates the live paths before invoking the ignored suite. Real Kokoro assets remain external and are not committed to this repository.
 
+## GitHub CI Asset Configuration
+
+The repository-owned Windows CI and release workflows expect real asset URLs to
+be provided from GitHub configuration rather than committed into the repo.
+
+Required GitHub configuration:
+
+- secret `KOKORO_TTS_RELEASE_KOKORO_MODEL_URL`
+- secret `KOKORO_TTS_RELEASE_ONNXRUNTIME_URL`
+- optional repository variable `KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL`
+
+Optional GitHub configuration:
+
+- repository variable `KOKORO_TTS_ENABLE_LIVE_ASSETS_CI=true` enables the
+  `windows-live-assets` job in `.github/workflows/ci.yml`
+
+The helper script below is the canonical configuration check used by both
+workflows:
+
+```powershell
+.\scripts\Assert-ReleaseAssetConfiguration.ps1
+```
+
+If the optional Piper zip variable is unset, the script derives the expected
+Windows Piper release archive URL from the current package version and uses that
+as the eSpeak runtime source.
+
 To stage packaging inputs into the repository-default release layout:
 
 ```powershell
-$env:LINGOPILOT_TTS_RELEASE_KOKORO_MODEL_URL = "https://example.invalid/kokoro-model.zip"
-$env:LINGOPILOT_TTS_RELEASE_ONNXRUNTIME_URL = "https://example.invalid/onnxruntime-win-x64.zip"
+$env:KOKORO_TTS_RELEASE_KOKORO_MODEL_URL = "https://example.invalid/kokoro-model.zip"
+$env:KOKORO_TTS_RELEASE_ONNXRUNTIME_URL = "https://example.invalid/onnxruntime-win-x64.zip"
 .\scripts\Stage-WindowsReleaseAssets.ps1
 ```
 
-Canonical Windows packaging resolves staged defaults automatically, but still accepts explicit overrides:
+The repository-owned release configuration now uses these neutral names as the primary interface:
+
+- `KOKORO_TTS_RELEASE_KOKORO_MODEL_URL`
+- `KOKORO_TTS_RELEASE_ONNXRUNTIME_URL`
+- `KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL` as an optional override only
+
+If `KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL` is unset, the staging script derives the matching Piper Windows release archive URL from the current package version and uses that as the default eSpeak runtime source.
+
+Temporary compatibility aliases remain accepted inside the scripts during the neutrality transition:
+`LINGOPILOT_TTS_RELEASE_KOKORO_MODEL_URL`,
+`LINGOPILOT_TTS_RELEASE_ONNXRUNTIME_URL`, and
+`LINGOPILOT_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL`.
+
+Canonical Windows packaging consumes the staged defaults directly:
 
 ```powershell
-.\scripts\Package-WindowsRelease.ps1 `
-  -ModelDir C:\absolute\path\to\kokoro-model-dir `
-  -OnnxRuntimeDll C:\absolute\path\to\onnxruntime.dll
+.\scripts\Package-WindowsRelease.ps1
 ```
 
-That script copies the resolved `.onnx` and `voices*.bin` into `kokoro-model/` inside the archive and places `onnxruntime.dll` beside the executable.
+That script copies the staged `.onnx` and `voices*.bin` into `kokoro-model/` inside the archive and places the staged `onnxruntime.dll` beside the executable. Explicit `-ModelDir` and `-OnnxRuntimeDll` overrides remain available for manual local packaging, but the repository workflows do not use them.
+
+After staging, `scripts\Verify-Readiness.ps1` automatically promotes the staged defaults below into `KOKORO_TTS_LIVE_*` for ignored live tests when explicit live-test env vars are unset:
+
+- `target\release\espeak-runtime`
+- `packaging\windows\kokoro-model`
+- `packaging\windows\onnxruntime.dll`
 
 To smoke-test the produced archive with a real synthesis request:
 
@@ -292,11 +365,33 @@ To smoke-test the produced archive with a real synthesis request:
   -ZipPath .\dist\lingopilot-tts-kokoro-v0.1.0-windows-x86_64.zip
 ```
 
+To verify the first published GitHub Release from the documented download URL:
+
+```powershell
+.\scripts\Test-PublishedRelease.ps1 -Version v0.1.0
+```
+
+That helper downloads the published zip and SHA-256 manifest, verifies the
+checksum, and then delegates to `scripts\Test-WindowsReleaseArchive.ps1`.
+
 For a full local verification pass:
 
 ```powershell
 .\scripts\Verify-Readiness.ps1
 ```
+
+To verify a packaged archive after `dist\` has been produced:
+
+```powershell
+.\scripts\Verify-Readiness.ps1 -Packaged
+```
+
+The Windows CI live-assets gate follows the same sequence with real assets: build, stage, run `cargo test --locked -- --ignored`, package, and then call `Verify-Readiness.ps1 -Packaged`.
+
+The release workflow adds one final published-artifact check after upload:
+`scripts\Test-PublishedRelease.ps1` must be able to download the new release
+archive from its documented GitHub Releases URL and pass the packaged smoke
+test.
 
 ## Release Readiness
 
@@ -304,11 +399,12 @@ Current release state: `NOT READY`
 
 It becomes `READY` only after all are true:
 
-- README matches actual behavior
+- `README.md` matches actual behavior
 - a valid request returns an `audio` header plus exactly `byte_length` PCM bytes
 - a second valid request in the same process also succeeds
 - Windows validation passes with real Kokoro assets
-- release packaging is defined and tested
+- release packaging is defined and tested with real assets rather than only staged structure
+- the first published GitHub Release has been smoke-tested end to end
 
 ## Upstream References
 
@@ -319,4 +415,4 @@ It becomes `READY` only after all are true:
 
 ## License
 
-This repository is currently licensed under the **Apache License 2.0** to match the intended Kokoro model direction. Revalidate the final license position before the backend is completed and before publishing release artifacts.
+This repository is currently licensed under the **Apache License 2.0**. Revalidate the final license position before publishing release artifacts.

@@ -3,13 +3,16 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
 #[path = "../src/protocol.rs"]
 mod protocol_contract;
+
+const PRIMARY_LOG_ENV: &str = "KOKORO_TTS_LOG";
+const LEGACY_LOG_ENV: &str = "LINGOPILOT_TTS_LOG";
 
 struct TempDir {
     path: PathBuf,
@@ -84,7 +87,7 @@ impl SidecarHarness {
     ) -> Self {
         let mut command = sidecar_command();
         if let Some(level) = level {
-            command.env("LINGOPILOT_TTS_LOG", level);
+            command.env(PRIMARY_LOG_ENV, level);
         }
         for (key, value) in extra_env {
             command.env(key, value);
@@ -164,7 +167,11 @@ impl SidecarHarness {
     fn wait_for_exit(&mut self, timeout: Duration) -> Option<i32> {
         let deadline = Instant::now() + timeout;
         loop {
-            match self.child.try_wait().expect("process status should be readable") {
+            match self
+                .child
+                .try_wait()
+                .expect("process status should be readable")
+            {
                 Some(status) => return status.code(),
                 None if Instant::now() >= deadline => return None,
                 None => thread::sleep(Duration::from_millis(20)),
@@ -183,7 +190,8 @@ impl Drop for SidecarHarness {
 fn sidecar_command() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_lingopilot-tts-kokoro"));
     command
-        .env_remove("LINGOPILOT_TTS_LOG")
+        .env_remove(PRIMARY_LOG_ENV)
+        .env_remove(LEGACY_LOG_ENV)
         .env_remove("ORT_DYLIB_PATH")
         .env_remove("RUST_LOG")
         .stdin(Stdio::piped())
@@ -229,6 +237,29 @@ enum PiperCompatibleResponse {
     Error { message: String },
 }
 
+fn assert_locked_error_prefix(message: &str, expected_prefix: &str) {
+    const ALLOWED_PREFIXES: [&str; 3] = [
+        "Invalid JSON request:",
+        "Invalid request payload:",
+        "Synthesis failed:",
+    ];
+
+    assert!(
+        ALLOWED_PREFIXES.contains(&expected_prefix),
+        "test must only assert locked error prefixes"
+    );
+    assert!(
+        ALLOWED_PREFIXES
+            .iter()
+            .any(|prefix| message.starts_with(prefix)),
+        "error message '{message}' did not use a locked prefix"
+    );
+    assert!(
+        message.starts_with(expected_prefix),
+        "error message '{message}' did not start with '{expected_prefix}'"
+    );
+}
+
 fn assert_stderr_is_plain_text(stderr: &str) {
     assert!(!stderr.contains('\0'), "stderr must not contain NUL bytes");
     assert!(
@@ -258,7 +289,10 @@ fn startup_unknown_argument_exits_without_ready() {
         .expect("sidecar should run to completion");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty(), "expected no ready output on stdout");
+    assert!(
+        output.stdout.is_empty(),
+        "expected no ready output on stdout"
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Startup error: Unknown startup argument"));
@@ -279,7 +313,10 @@ fn startup_duplicate_argument_exits_without_ready() {
         .expect("sidecar should run to completion");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty(), "expected no ready output on stdout");
+    assert!(
+        output.stdout.is_empty(),
+        "expected no ready output on stdout"
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Startup error: Duplicate startup argument"));
@@ -294,7 +331,10 @@ fn startup_missing_flag_value_exits_without_ready() {
         .expect("sidecar should run to completion");
 
     assert!(!output.status.success());
-    assert!(output.stdout.is_empty(), "expected no ready output on stdout");
+    assert!(
+        output.stdout.is_empty(),
+        "expected no ready output on stdout"
+    );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Startup error: Missing value for --espeak-data-dir"));
@@ -348,10 +388,12 @@ fn malformed_json_returns_error_and_process_stays_alive() {
 
     let error = sidecar.read_json_line();
     assert_eq!(error["type"], "error");
-    assert!(error["message"]
-        .as_str()
-        .expect("message should be present")
-        .contains("Invalid JSON request:"));
+    assert_locked_error_prefix(
+        error["message"]
+            .as_str()
+            .expect("message should be present"),
+        "Invalid JSON request:",
+    );
 
     sidecar.send_json(json!({
         "text": "",
@@ -362,10 +404,12 @@ fn malformed_json_returns_error_and_process_stays_alive() {
 
     let follow_up = sidecar.read_json_line();
     assert_eq!(follow_up["type"], "error");
-    assert!(follow_up["message"]
-        .as_str()
-        .expect("message should be present")
-        .starts_with("Invalid request payload:"));
+    assert_locked_error_prefix(
+        follow_up["message"]
+            .as_str()
+            .expect("message should be present"),
+        "Invalid request payload:",
+    );
 }
 
 #[test]
@@ -384,10 +428,11 @@ fn request_with_legacy_espeak_data_dir_is_rejected_and_process_stays_alive() {
 
     let error = sidecar.read_json_line();
     assert_eq!(error["type"], "error");
-    assert!(error["message"]
+    let message = error["message"]
         .as_str()
-        .expect("message should be present")
-        .contains("unknown field `espeak_data_dir`"));
+        .expect("message should be present");
+    assert_locked_error_prefix(message, "Invalid request payload:");
+    assert!(message.contains("unknown field `espeak_data_dir`"));
 }
 
 #[test]
@@ -406,10 +451,11 @@ fn request_with_language_is_rejected_and_process_stays_alive() {
 
     let error = sidecar.read_json_line();
     assert_eq!(error["type"], "error");
-    assert!(error["message"]
+    let message = error["message"]
         .as_str()
-        .expect("message should be present")
-        .contains("unknown field `language`"));
+        .expect("message should be present");
+    assert_locked_error_prefix(message, "Invalid request payload:");
+    assert!(message.contains("unknown field `language`"));
 }
 
 #[test]
@@ -456,7 +502,7 @@ fn invalid_semantic_payload_returns_error_and_process_stays_alive() {
         let message = error["message"]
             .as_str()
             .expect("message should be present");
-        assert!(message.contains("Invalid request payload:"));
+        assert_locked_error_prefix(message, "Invalid request payload:");
         assert!(message.contains(expected_fragment));
     }
 }
@@ -476,7 +522,7 @@ fn missing_kokoro_assets_return_payload_error_before_synthesis() {
     let message = error["message"]
         .as_str()
         .expect("message should be present");
-    assert!(message.starts_with("Invalid request payload:"));
+    assert_locked_error_prefix(message, "Invalid request payload:");
     assert!(message.contains("expected exactly one Kokoro model (*.onnx)"));
 }
 
@@ -491,10 +537,12 @@ fn debug_logging_keeps_stdout_protocol_only_and_stderr_text_only_on_error_paths(
     sidecar.send_json(valid_supported_request(bundle.path()));
     let error = sidecar.read_json_line();
     assert_eq!(error["type"], "error");
-    assert!(error["message"]
-        .as_str()
-        .expect("message should be present")
-        .starts_with("Invalid request payload:"));
+    assert_locked_error_prefix(
+        error["message"]
+            .as_str()
+            .expect("message should be present"),
+        "Invalid request payload:",
+    );
 
     sidecar.close_stdin();
     let remaining_stdout = sidecar.read_remaining_stdout();
@@ -507,6 +555,58 @@ fn debug_logging_keeps_stdout_protocol_only_and_stderr_text_only_on_error_paths(
     assert!(stderr.contains("level=INFO event=startup"));
     assert!(stderr.contains("level=WARN event=request_rejected"));
     assert!(stderr.contains("category=invalid_request_payload"));
+    assert_stderr_is_plain_text(&stderr);
+}
+
+#[test]
+fn neutral_log_env_is_preferred_over_legacy_alias() {
+    let runtime_dir = TempDir::new("neutral-log-runtime");
+    create_espeak_runtime(runtime_dir.path());
+    let runtime_path = runtime_dir.path().to_path_buf();
+    let mut sidecar = SidecarHarness::spawn_with_runtime_and_env(
+        &runtime_path,
+        Some(runtime_dir),
+        None,
+        &[(PRIMARY_LOG_ENV, "debug"), (LEGACY_LOG_ENV, "error")],
+    );
+    let bundle = TempDir::new("neutral-log-bundle");
+
+    let ready = sidecar.read_json_line();
+    assert_eq!(ready["type"], "ready");
+
+    sidecar.send_json(valid_supported_request(bundle.path()));
+    let error = sidecar.read_json_line();
+    assert_eq!(error["type"], "error");
+
+    let stderr = sidecar.shutdown_and_collect_stderr();
+    assert!(stderr.contains("level=INFO event=startup"));
+    assert!(stderr.contains("level=WARN event=request_rejected"));
+    assert_stderr_is_plain_text(&stderr);
+}
+
+#[test]
+fn legacy_log_env_remains_supported_as_a_temporary_alias() {
+    let runtime_dir = TempDir::new("legacy-log-runtime");
+    create_espeak_runtime(runtime_dir.path());
+    let runtime_path = runtime_dir.path().to_path_buf();
+    let mut sidecar = SidecarHarness::spawn_with_runtime_and_env(
+        &runtime_path,
+        Some(runtime_dir),
+        None,
+        &[(LEGACY_LOG_ENV, "debug")],
+    );
+    let bundle = TempDir::new("legacy-log-bundle");
+
+    let ready = sidecar.read_json_line();
+    assert_eq!(ready["type"], "ready");
+
+    sidecar.send_json(valid_supported_request(bundle.path()));
+    let error = sidecar.read_json_line();
+    assert_eq!(error["type"], "error");
+
+    let stderr = sidecar.shutdown_and_collect_stderr();
+    assert!(stderr.contains("level=INFO event=startup"));
+    assert!(stderr.contains("level=WARN event=request_rejected"));
     assert_stderr_is_plain_text(&stderr);
 }
 
@@ -545,10 +645,53 @@ fn protocol_responses_remain_piper_compatible() {
                 assert_eq!(channels, 1);
             }
             PiperCompatibleResponse::Error { message } => {
-                assert!(message.starts_with("Invalid request payload:"));
+                assert_locked_error_prefix(&message, "Invalid request payload:");
             }
         }
     }
+}
+
+#[test]
+fn protocol_response_json_shapes_remain_exact() {
+    let ready = serde_json::to_value(protocol_contract::TtsResponse::Ready {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
+    .expect("ready response should serialize");
+    assert_eq!(
+        ready,
+        json!({
+            "type": "ready",
+            "version": env!("CARGO_PKG_VERSION"),
+        })
+    );
+
+    let audio = serde_json::to_value(protocol_contract::TtsResponse::Audio {
+        byte_length: 24,
+        sample_rate: 24000,
+        channels: 1,
+    })
+    .expect("audio response should serialize");
+    assert_eq!(
+        audio,
+        json!({
+            "type": "audio",
+            "byte_length": 24,
+            "sample_rate": 24000,
+            "channels": 1,
+        })
+    );
+
+    let error = serde_json::to_value(protocol_contract::TtsResponse::Error {
+        message: "Synthesis failed: example".to_string(),
+    })
+    .expect("error response should serialize");
+    assert_eq!(
+        error,
+        json!({
+            "type": "error",
+            "message": "Synthesis failed: example",
+        })
+    );
 }
 
 #[test]
@@ -586,10 +729,12 @@ fn error_paths_never_leak_binary_payload_and_process_stays_alive() {
     sidecar.send_raw_line(r#"{"text":"Hello","voice":"af_heart""#);
     let invalid_json = sidecar.read_json_line();
     assert_eq!(invalid_json["type"], "error");
-    assert!(invalid_json["message"]
-        .as_str()
-        .expect("message should be present")
-        .starts_with("Invalid JSON request:"));
+    assert_locked_error_prefix(
+        invalid_json["message"]
+            .as_str()
+            .expect("message should be present"),
+        "Invalid JSON request:",
+    );
 
     sidecar.send_json(json!({
         "text": "",
@@ -600,19 +745,23 @@ fn error_paths_never_leak_binary_payload_and_process_stays_alive() {
     assert_eq!(sidecar.peek_stdout_byte(), Some(b'{'));
     let invalid_payload = sidecar.read_json_line();
     assert_eq!(invalid_payload["type"], "error");
-    assert!(invalid_payload["message"]
-        .as_str()
-        .expect("message should be present")
-        .starts_with("Invalid request payload:"));
+    assert_locked_error_prefix(
+        invalid_payload["message"]
+            .as_str()
+            .expect("message should be present"),
+        "Invalid request payload:",
+    );
 
     sidecar.send_json(valid_supported_request(missing_bundle.path()));
     assert_eq!(sidecar.peek_stdout_byte(), Some(b'{'));
     let bundle_error = sidecar.read_json_line();
     assert_eq!(bundle_error["type"], "error");
-    assert!(bundle_error["message"]
-        .as_str()
-        .expect("message should be present")
-        .starts_with("Invalid request payload:"));
+    assert_locked_error_prefix(
+        bundle_error["message"]
+            .as_str()
+            .expect("message should be present"),
+        "Invalid request payload:",
+    );
 
     sidecar.send_json(request_for(
         "Konnichiwa from Kokoro",
@@ -622,10 +771,12 @@ fn error_paths_never_leak_binary_payload_and_process_stays_alive() {
     assert_eq!(sidecar.peek_stdout_byte(), Some(b'{'));
     let synthesis_error = sidecar.read_json_line();
     assert_eq!(synthesis_error["type"], "error");
-    assert!(synthesis_error["message"]
-        .as_str()
-        .expect("message should be present")
-        .starts_with("Synthesis failed:"));
+    assert_locked_error_prefix(
+        synthesis_error["message"]
+            .as_str()
+            .expect("message should be present"),
+        "Synthesis failed:",
+    );
 
     sidecar.send_json(json!({
         "text": "Hello",
@@ -637,10 +788,11 @@ fn error_paths_never_leak_binary_payload_and_process_stays_alive() {
     assert_eq!(sidecar.peek_stdout_byte(), Some(b'{'));
     let follow_up = sidecar.read_json_line();
     assert_eq!(follow_up["type"], "error");
-    assert!(follow_up["message"]
+    let message = follow_up["message"]
         .as_str()
-        .expect("message should be present")
-        .contains("unknown field `language`"));
+        .expect("message should be present");
+    assert_locked_error_prefix(message, "Invalid request payload:");
+    assert!(message.contains("unknown field `language`"));
 
     sidecar.close_stdin();
     let remaining_stdout = sidecar.read_remaining_stdout();
@@ -652,6 +804,58 @@ fn error_paths_never_leak_binary_payload_and_process_stays_alive() {
     let stderr = sidecar.shutdown_and_collect_stderr();
     assert!(stderr.contains("category=invalid_json"));
     assert!(stderr.contains("category=invalid_request_payload"));
+    assert!(stderr.contains("category=synthesis_failed"));
+    assert_stderr_is_plain_text(&stderr);
+}
+
+#[test]
+fn deferred_japanese_and_mandarin_requests_fail_cleanly_and_later_valid_request_is_processed() {
+    let mut sidecar = SidecarHarness::spawn_with_log_level(Some("debug"));
+    let synthesis_failure_bundle = TempDir::new("deferred-language-bundle");
+    create_kokoro_bundle(synthesis_failure_bundle.path());
+
+    let ready = sidecar.read_json_line();
+    assert_eq!(ready["type"], "ready");
+
+    for (voice, lang_code, text) in [
+        ("jf_alpha", "j", "Konnichiwa from Kokoro"),
+        ("zf_xiaobei", "z", "Ni hao from Kokoro"),
+    ] {
+        sidecar.send_json(request_for(text, voice, synthesis_failure_bundle.path()));
+        assert_eq!(sidecar.peek_stdout_byte(), Some(b'{'));
+
+        let error = sidecar.read_json_line();
+        assert_eq!(error["type"], "error");
+
+        let message = error["message"]
+            .as_str()
+            .expect("message should be present");
+        assert_locked_error_prefix(message, "Synthesis failed:");
+        assert!(message.contains(&format!(
+            "phonemization is not implemented yet for lang_code='{lang_code}'"
+        )));
+    }
+
+    sidecar.send_json(valid_supported_request(synthesis_failure_bundle.path()));
+    assert_eq!(sidecar.peek_stdout_byte(), Some(b'{'));
+
+    let follow_up = sidecar.read_json_line();
+    assert_eq!(follow_up["type"], "error");
+    assert_locked_error_prefix(
+        follow_up["message"]
+            .as_str()
+            .expect("message should be present"),
+        "Synthesis failed:",
+    );
+
+    sidecar.close_stdin();
+    let remaining_stdout = sidecar.read_remaining_stdout();
+    assert!(
+        remaining_stdout.is_empty(),
+        "stdout must not contain leaked binary payloads after deferred-language errors"
+    );
+
+    let stderr = sidecar.shutdown_and_collect_stderr();
     assert!(stderr.contains("category=synthesis_failed"));
     assert_stderr_is_plain_text(&stderr);
 }

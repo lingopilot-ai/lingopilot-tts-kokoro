@@ -21,6 +21,10 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
+[dev-dependencies]
+tiny_http = "0.12"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+
 [profile.release]
 lto = true
 codegen-units = 1

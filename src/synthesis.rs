@@ -990,9 +990,18 @@ fn ensure_onnxruntime_loaded() -> Result<(), String> {
 }
 
 fn resolve_onnxruntime_library_path() -> Result<PathBuf, String> {
-    match std::env::var(ORT_DYLIB_PATH_ENV) {
-        Ok(value) if !value.trim().is_empty() => {
-            let path = PathBuf::from(value.trim());
+    let current_exe = std::env::current_exe()
+        .map_err(|error| format!("Cannot locate current executable: {}", error))?;
+    resolve_onnxruntime_library_path_for(std::env::var_os(ORT_DYLIB_PATH_ENV), &current_exe)
+}
+
+fn resolve_onnxruntime_library_path_for(
+    env_value: Option<std::ffi::OsString>,
+    current_exe: &Path,
+) -> Result<PathBuf, String> {
+    match env_value {
+        Some(value) if !value.is_empty() && !value.to_string_lossy().trim().is_empty() => {
+            let path = PathBuf::from(value);
             if !path.is_absolute() {
                 return Err(format!(
                     "Cannot initialize ONNX Runtime: {} must be an absolute path",
@@ -1008,8 +1017,6 @@ fn resolve_onnxruntime_library_path() -> Result<PathBuf, String> {
             Ok(path)
         }
         _ => {
-            let current_exe = std::env::current_exe()
-                .map_err(|error| format!("Cannot locate current executable: {}", error))?;
             let Some(exe_dir) = current_exe.parent() else {
                 return Err(format!(
                     "Cannot initialize ONNX Runtime: executable '{}' has no parent directory",
@@ -1287,10 +1294,12 @@ fn platform_espeak_library_name() -> &'static str {
 mod tests {
     use super::{
         filter_phonemes_to_vocab, float_audio_to_pcm16, load_voice_styles,
-        normalize_english_phonemes, platform_espeak_library_name, resolve_espeak_library_path,
-        resolve_model_assets, split_phonemes_for_inference, tokenize_phonemes,
+        normalize_english_phonemes, platform_espeak_library_name,
+        platform_onnxruntime_library_name, resolve_espeak_library_path, resolve_model_assets,
+        resolve_onnxruntime_library_path_for, split_phonemes_for_inference, tokenize_phonemes,
         validate_espeak_data_dir, validate_model_dir, KokoroRuntime, PhonemeResult,
         ResolvedModelAssets, ResolvedVoice, RuntimeFactory, RuntimeKey, SynthesisCache,
+        ORT_DYLIB_PATH_ENV,
     };
     use crate::kokoro_vocab;
     use crate::live_test_support::LiveTestAssets;
@@ -1396,6 +1405,12 @@ mod tests {
         fs::create_dir(dir.join("espeak-ng-data")).expect("runtime data dir should be created");
     }
 
+    fn create_onnxruntime_dll(dir: &Path) -> PathBuf {
+        let dll_path = dir.join(platform_onnxruntime_library_name());
+        fs::write(&dll_path, b"onnxruntime").expect("onnxruntime dll should be created");
+        dll_path
+    }
+
     fn create_kokoro_bundle(dir: &Path) {
         fs::write(dir.join("kokoro-v1.0.onnx"), b"model").expect("model should be created");
         fs::write(dir.join("voices-v1.0.bin"), b"voices").expect("voices bundle should be created");
@@ -1435,6 +1450,8 @@ mod tests {
                 ("a", false, Some("en-us"))
             } else if voice_id.starts_with("ef_") || voice_id.starts_with("em_") {
                 ("e", false, Some("es"))
+            } else if voice_id.starts_with("zf_") || voice_id.starts_with("zm_") {
+                ("z", false, None)
             } else {
                 ("j", false, None)
             };
@@ -1491,6 +1508,73 @@ mod tests {
 
         assert!(error.contains("missing shared library"));
         assert!(error.contains(platform_espeak_library_name()));
+    }
+
+    #[test]
+    fn onnxruntime_env_absolute_path_wins_over_sibling_fallback() {
+        let env_dir = TempDir::new("onnxruntime-env");
+        let exe_dir = TempDir::new("onnxruntime-exe");
+        let env_dll = create_onnxruntime_dll(env_dir.path());
+        let exe_path = exe_dir.path().join("lingopilot-tts-kokoro.exe");
+        let sibling_dll = create_onnxruntime_dll(exe_dir.path());
+
+        let resolved =
+            resolve_onnxruntime_library_path_for(Some(env_dll.clone().into()), &exe_path)
+                .expect("absolute ORT_DYLIB_PATH should win");
+
+        assert_eq!(resolved, env_dll);
+        assert_ne!(resolved, sibling_dll);
+    }
+
+    #[test]
+    fn onnxruntime_env_requires_absolute_path() {
+        let exe_dir = TempDir::new("onnxruntime-relative");
+        let exe_path = exe_dir.path().join("lingopilot-tts-kokoro.exe");
+
+        let error = resolve_onnxruntime_library_path_for(
+            Some("relative\\onnxruntime.dll".into()),
+            &exe_path,
+        )
+        .expect_err("relative ORT_DYLIB_PATH should fail");
+
+        assert_eq!(
+            error,
+            format!(
+                "Cannot initialize ONNX Runtime: {} must be an absolute path",
+                ORT_DYLIB_PATH_ENV
+            )
+        );
+    }
+
+    #[test]
+    fn onnxruntime_missing_env_falls_back_to_sibling_library() {
+        let exe_dir = TempDir::new("onnxruntime-sibling");
+        let exe_path = exe_dir.path().join("lingopilot-tts-kokoro.exe");
+        let sibling_dll = create_onnxruntime_dll(exe_dir.path());
+
+        let resolved = resolve_onnxruntime_library_path_for(None, &exe_path)
+            .expect("missing env should fall back to sibling dll");
+
+        assert_eq!(resolved, sibling_dll);
+    }
+
+    #[test]
+    fn onnxruntime_missing_env_and_missing_sibling_return_deterministic_error() {
+        let exe_dir = TempDir::new("onnxruntime-missing");
+        let exe_path = exe_dir.path().join("lingopilot-tts-kokoro.exe");
+        let expected_path = exe_dir.path().join(platform_onnxruntime_library_name());
+
+        let error = resolve_onnxruntime_library_path_for(None, &exe_path)
+            .expect_err("missing sibling dll should fail");
+
+        assert_eq!(
+            error,
+            format!(
+                "Cannot initialize ONNX Runtime: missing shared library '{}' beside the executable; alternatively set {} to an absolute path",
+                expected_path.display(),
+                ORT_DYLIB_PATH_ENV
+            )
+        );
     }
 
     #[test]
@@ -1583,6 +1667,19 @@ mod tests {
             resolve_model_assets(temp_dir.path(), "jf_alpha").expect("bundle should resolve");
 
         assert_eq!(resolved.voice.lang_code, "j");
+        assert!(!resolved.voice.british);
+        assert_eq!(resolved.voice.espeak_voice, None);
+    }
+
+    #[test]
+    fn resolves_mandarin_voice_without_espeak_binding() {
+        let temp_dir = TempDir::new("resolve-mandarin");
+        create_kokoro_bundle(temp_dir.path());
+
+        let resolved =
+            resolve_model_assets(temp_dir.path(), "zf_xiaobei").expect("bundle should resolve");
+
+        assert_eq!(resolved.voice.lang_code, "z");
         assert!(!resolved.voice.british);
         assert_eq!(resolved.voice.espeak_voice, None);
     }
@@ -1770,6 +1867,35 @@ mod tests {
         assert_eq!(
             error,
             "phonemization is not implemented yet for lang_code='j'"
+        );
+    }
+
+    #[test]
+    fn mandarin_voice_returns_explicit_phonemization_gap() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let phonemizer = MockPhonemizer {
+            calls: Arc::clone(&calls),
+            result: Err("phonemization is not implemented yet for lang_code='z'".to_string()),
+        };
+        let assets = resolved_assets_for_voice("zf_xiaobei");
+        let factory = MockRuntimeFactory {
+            loads: Arc::new(Mutex::new(Vec::new())),
+            synth_calls: Arc::new(Mutex::new(Vec::new())),
+            output: vec![0.0],
+        };
+        let mut cache = SynthesisCache::with_components(Box::new(phonemizer), Box::new(factory));
+
+        let error = cache
+            .synthesize("ni hao", &assets, 1.0)
+            .expect_err("mandarin phonemization should fail explicitly");
+
+        assert_eq!(
+            calls.lock().expect("calls should be lockable").as_slice(),
+            &["zf_xiaobei".to_string()]
+        );
+        assert_eq!(
+            error,
+            "phonemization is not implemented yet for lang_code='z'"
         );
     }
 

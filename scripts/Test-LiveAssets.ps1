@@ -1,10 +1,31 @@
 param(
-    [string]$EspeakRuntimeDir = $env:LINGOPILOT_TTS_LIVE_ESPEAK_RUNTIME_DIR,
-    [string]$ModelDir = $env:LINGOPILOT_TTS_LIVE_MODEL_DIR,
-    [string]$OnnxRuntimeDll = $env:LINGOPILOT_TTS_LIVE_ONNXRUNTIME_DLL
+    [string]$EspeakRuntimeDir = $env:KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR,
+    [string]$ModelDir = $env:KOKORO_TTS_LIVE_MODEL_DIR,
+    [string]$OnnxRuntimeDll = $env:KOKORO_TTS_LIVE_ONNXRUNTIME_DLL
 )
 
 $ErrorActionPreference = "Stop"
+
+function Resolve-AliasedValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PrimaryName,
+        [string]$PrimaryValue,
+        [Parameter(Mandatory = $true)]
+        [string]$LegacyName,
+        [string]$LegacyValue
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($PrimaryValue)) {
+        return $PrimaryValue
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($LegacyValue)) {
+        return $LegacyValue
+    }
+
+    return $null
+}
 
 function Resolve-RequiredPath {
     param(
@@ -42,18 +63,39 @@ function Resolve-RequiredPath {
     return $resolved
 }
 
-$resolvedRuntimeDir = Resolve-RequiredPath -Name "LINGOPILOT_TTS_LIVE_ESPEAK_RUNTIME_DIR" -Value $EspeakRuntimeDir -Kind Directory
-$resolvedModelDir = Resolve-RequiredPath -Name "LINGOPILOT_TTS_LIVE_MODEL_DIR" -Value $ModelDir -Kind Directory
-$resolvedOnnxRuntimeDll = Resolve-RequiredPath -Name "LINGOPILOT_TTS_LIVE_ONNXRUNTIME_DLL" -Value $OnnxRuntimeDll -Kind File
+$resolvedRuntimeDir = Resolve-RequiredPath `
+    -Name "KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR" `
+    -Value (Resolve-AliasedValue `
+        -PrimaryName "KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR" `
+        -PrimaryValue $EspeakRuntimeDir `
+        -LegacyName "LINGOPILOT_TTS_LIVE_ESPEAK_RUNTIME_DIR" `
+        -LegacyValue $env:LINGOPILOT_TTS_LIVE_ESPEAK_RUNTIME_DIR) `
+    -Kind Directory
+$resolvedModelDir = Resolve-RequiredPath `
+    -Name "KOKORO_TTS_LIVE_MODEL_DIR" `
+    -Value (Resolve-AliasedValue `
+        -PrimaryName "KOKORO_TTS_LIVE_MODEL_DIR" `
+        -PrimaryValue $ModelDir `
+        -LegacyName "LINGOPILOT_TTS_LIVE_MODEL_DIR" `
+        -LegacyValue $env:LINGOPILOT_TTS_LIVE_MODEL_DIR) `
+    -Kind Directory
+$resolvedOnnxRuntimeDll = Resolve-RequiredPath `
+    -Name "KOKORO_TTS_LIVE_ONNXRUNTIME_DLL" `
+    -Value (Resolve-AliasedValue `
+        -PrimaryName "KOKORO_TTS_LIVE_ONNXRUNTIME_DLL" `
+        -PrimaryValue $OnnxRuntimeDll `
+        -LegacyName "LINGOPILOT_TTS_LIVE_ONNXRUNTIME_DLL" `
+        -LegacyValue $env:LINGOPILOT_TTS_LIVE_ONNXRUNTIME_DLL) `
+    -Kind File
 
 $espeakDataDir = Join-Path $resolvedRuntimeDir "espeak-ng-data"
 if (-not (Test-Path -LiteralPath $espeakDataDir -PathType Container)) {
-    throw "LINGOPILOT_TTS_LIVE_ESPEAK_RUNTIME_DIR must contain 'espeak-ng-data'. Missing '$espeakDataDir'."
+    throw "KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR must contain 'espeak-ng-data'. Missing '$espeakDataDir'."
 }
 
-$env:LINGOPILOT_TTS_LIVE_ESPEAK_RUNTIME_DIR = $resolvedRuntimeDir
-$env:LINGOPILOT_TTS_LIVE_MODEL_DIR = $resolvedModelDir
-$env:LINGOPILOT_TTS_LIVE_ONNXRUNTIME_DLL = $resolvedOnnxRuntimeDll
+$env:KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR = $resolvedRuntimeDir
+$env:KOKORO_TTS_LIVE_MODEL_DIR = $resolvedModelDir
+$env:KOKORO_TTS_LIVE_ONNXRUNTIME_DLL = $resolvedOnnxRuntimeDll
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Push-Location $repoRoot

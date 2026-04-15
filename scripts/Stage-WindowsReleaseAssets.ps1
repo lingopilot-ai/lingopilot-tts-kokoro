@@ -1,8 +1,8 @@
 param(
     [string]$Version,
-    [string]$KokoroModelUrl = $env:LINGOPILOT_TTS_RELEASE_KOKORO_MODEL_URL,
-    [string]$OnnxRuntimeUrl = $env:LINGOPILOT_TTS_RELEASE_ONNXRUNTIME_URL,
-    [string]$PiperWindowsReleaseZipUrl = $env:LINGOPILOT_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL
+    [string]$KokoroModelUrl = $env:KOKORO_TTS_RELEASE_KOKORO_MODEL_URL,
+    [string]$OnnxRuntimeUrl = $env:KOKORO_TTS_RELEASE_ONNXRUNTIME_URL,
+    [string]$PiperWindowsReleaseZipUrl = $env:KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,6 +30,27 @@ function Resolve-NonEmptyValue {
     }
 
     return $Value.Trim()
+}
+
+function Resolve-AliasedValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PrimaryName,
+        [string]$PrimaryValue,
+        [Parameter(Mandatory = $true)]
+        [string]$LegacyName,
+        [string]$LegacyValue
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($PrimaryValue)) {
+        return Resolve-NonEmptyValue -Name $PrimaryName -Value $PrimaryValue
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($LegacyValue)) {
+        return Resolve-NonEmptyValue -Name $PrimaryName -Value $LegacyValue
+    }
+
+    throw "$PrimaryName must be configured. Legacy alias accepted temporarily: $LegacyName."
 }
 
 function New-CleanDirectory {
@@ -107,13 +128,28 @@ if ($normalizedVersion.StartsWith("v")) {
 }
 
 $versionTag = "v$normalizedVersion"
-if ([string]::IsNullOrWhiteSpace($PiperWindowsReleaseZipUrl)) {
+if (
+    [string]::IsNullOrWhiteSpace($PiperWindowsReleaseZipUrl) -and
+    [string]::IsNullOrWhiteSpace($env:LINGOPILOT_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL)
+) {
     $PiperWindowsReleaseZipUrl = "https://github.com/lingopilot-ai/lingopilot-tts-piper/releases/download/$versionTag/lingopilot-tts-piper-$versionTag-windows-x86_64.zip"
 }
 
-$resolvedKokoroModelUrl = Resolve-NonEmptyValue -Name "LINGOPILOT_TTS_RELEASE_KOKORO_MODEL_URL" -Value $KokoroModelUrl
-$resolvedOnnxRuntimeUrl = Resolve-NonEmptyValue -Name "LINGOPILOT_TTS_RELEASE_ONNXRUNTIME_URL" -Value $OnnxRuntimeUrl
-$resolvedPiperZipUrl = Resolve-NonEmptyValue -Name "LINGOPILOT_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL" -Value $PiperWindowsReleaseZipUrl
+$resolvedKokoroModelUrl = Resolve-AliasedValue `
+    -PrimaryName "KOKORO_TTS_RELEASE_KOKORO_MODEL_URL" `
+    -PrimaryValue $KokoroModelUrl `
+    -LegacyName "LINGOPILOT_TTS_RELEASE_KOKORO_MODEL_URL" `
+    -LegacyValue $env:LINGOPILOT_TTS_RELEASE_KOKORO_MODEL_URL
+$resolvedOnnxRuntimeUrl = Resolve-AliasedValue `
+    -PrimaryName "KOKORO_TTS_RELEASE_ONNXRUNTIME_URL" `
+    -PrimaryValue $OnnxRuntimeUrl `
+    -LegacyName "LINGOPILOT_TTS_RELEASE_ONNXRUNTIME_URL" `
+    -LegacyValue $env:LINGOPILOT_TTS_RELEASE_ONNXRUNTIME_URL
+$resolvedPiperZipUrl = Resolve-AliasedValue `
+    -PrimaryName "KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL" `
+    -PrimaryValue $PiperWindowsReleaseZipUrl `
+    -LegacyName "LINGOPILOT_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL" `
+    -LegacyValue $env:LINGOPILOT_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL
 
 $downloadRoot = Join-Path $repoRoot "target\release-staging-downloads"
 $extractRoot = Join-Path $repoRoot "target\release-staging-extract"
@@ -159,7 +195,7 @@ if ([System.IO.Path]::GetExtension($onnxRuntimeDownloadPath) -ieq ".zip") {
     Copy-Item -LiteralPath $onnxRuntimeDll.FullName -Destination $packagingOnnxRuntimeDll
 } else {
     if ([System.IO.Path]::GetFileName($onnxRuntimeDownloadPath) -ine "onnxruntime.dll") {
-        throw "LINGOPILOT_TTS_RELEASE_ONNXRUNTIME_URL must point to onnxruntime.dll or to a zip that contains it. Got '$onnxRuntimeDownloadPath'."
+        throw "KOKORO_TTS_RELEASE_ONNXRUNTIME_URL must point to onnxruntime.dll or to a zip that contains it. Got '$onnxRuntimeDownloadPath'."
     }
     Copy-Item -LiteralPath $onnxRuntimeDownloadPath -Destination $packagingOnnxRuntimeDll
 }

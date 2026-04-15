@@ -18,7 +18,8 @@ use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::registry::LookupSpan;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const ESPEAK_DATA_ENV: &str = "LINGOPILOT_TTS_ESPEAKNG_DATA_DIRECTORY";
+const PRIMARY_LOG_ENV: &str = "KOKORO_TTS_LOG";
+const LEGACY_LOG_ENV: &str = "LINGOPILOT_TTS_LOG";
 
 #[derive(Debug, PartialEq, Eq)]
 struct StartupConfig {
@@ -97,16 +98,19 @@ fn format_string_value(value: &str) -> String {
     }
 }
 
+fn load_log_env_filter() -> tracing_subscriber::EnvFilter {
+    for key in [PRIMARY_LOG_ENV, LEGACY_LOG_ENV, "RUST_LOG"] {
+        if let Ok(filter) = tracing_subscriber::EnvFilter::try_from_env(key) {
+            return filter;
+        }
+    }
+
+    tracing_subscriber::EnvFilter::new("warn")
+}
+
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("LINGOPILOT_TTS_LOG").unwrap_or_else(
-                |_| {
-                    tracing_subscriber::EnvFilter::try_from_env("RUST_LOG")
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"))
-                },
-            ),
-        )
+        .with_env_filter(load_log_env_filter())
         .with_writer(io::stderr)
         .with_ansi(false)
         .event_format(ObservabilityFormatter)
@@ -122,7 +126,6 @@ fn main() -> ExitCode {
         }
     };
 
-    std::env::set_var(ESPEAK_DATA_ENV, &startup.espeak_data_dir);
     tracing::info!(
         event = "espeak_runtime_selected",
         espeak_data_dir = startup.espeak_data_dir.display().to_string()

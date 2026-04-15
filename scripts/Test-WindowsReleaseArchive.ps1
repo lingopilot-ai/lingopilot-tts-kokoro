@@ -165,7 +165,7 @@ try {
     $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
-    $startInfo.Environment["LINGOPILOT_TTS_LOG"] = "debug"
+    $startInfo.Environment["KOKORO_TTS_LOG"] = "debug"
 
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo

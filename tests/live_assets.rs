@@ -23,14 +23,10 @@ fn temp_live_dir(prefix: &str) -> PathBuf {
     ))
 }
 
-#[test]
-#[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
-fn live_invalid_voice_returns_payload_error_with_real_bundle() {
-    let live_assets = LiveTestAssets::from_env();
-
+fn spawn_ready_sidecar(live_assets: &LiveTestAssets, level: Option<&str>) -> SidecarHarness {
     let mut sidecar = SidecarHarness::spawn_with_runtime_and_env(
         &live_assets.espeak_runtime_dir,
-        None,
+        level,
         &[(
             "ORT_DYLIB_PATH",
             live_assets
@@ -42,6 +38,32 @@ fn live_invalid_voice_returns_payload_error_with_real_bundle() {
 
     let ready = sidecar.read_json_line();
     assert_eq!(ready["type"], "ready");
+    sidecar
+}
+
+fn assert_audio_response(sidecar: &mut SidecarHarness) -> usize {
+    let audio = sidecar.read_json_line();
+    assert_eq!(audio["type"], "audio");
+    assert_eq!(audio["sample_rate"], 24000);
+    assert_eq!(audio["channels"], 1);
+
+    let byte_length = audio["byte_length"]
+        .as_u64()
+        .expect("byte_length should be present") as usize;
+    assert!(byte_length > 0);
+    assert_eq!(byte_length % 2, 0);
+
+    let bytes = sidecar.read_exact_stdout_bytes(byte_length);
+    assert_eq!(bytes.len(), byte_length);
+    byte_length
+}
+
+#[test]
+#[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
+fn live_invalid_voice_returns_payload_error_with_real_bundle() {
+    let live_assets = LiveTestAssets::from_env();
+
+    let mut sidecar = spawn_ready_sidecar(&live_assets, None);
 
     sidecar.send_json(json!({
         "text": "Hello from Kokoro",
@@ -62,23 +84,9 @@ fn live_invalid_voice_returns_payload_error_with_real_bundle() {
 
 #[test]
 #[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
-fn live_english_request_returns_audio_and_exact_pcm_bytes() {
+fn live_american_english_request_returns_audio_and_exact_pcm_bytes() {
     let live_assets = LiveTestAssets::from_env();
-
-    let mut sidecar = SidecarHarness::spawn_with_runtime_and_env(
-        &live_assets.espeak_runtime_dir,
-        None,
-        &[(
-            "ORT_DYLIB_PATH",
-            live_assets
-                .onnxruntime_dll
-                .to_str()
-                .expect("dll path should be utf-8"),
-        )],
-    );
-
-    let ready = sidecar.read_json_line();
-    assert_eq!(ready["type"], "ready");
+    let mut sidecar = spawn_ready_sidecar(&live_assets, None);
 
     sidecar.send_json(request_for(
         "Hello from Kokoro",
@@ -86,40 +94,29 @@ fn live_english_request_returns_audio_and_exact_pcm_bytes() {
         &live_assets.model_dir,
     ));
 
-    let audio = sidecar.read_json_line();
-    assert_eq!(audio["type"], "audio");
-    assert_eq!(audio["sample_rate"], 24000);
-    assert_eq!(audio["channels"], 1);
-
-    let byte_length = audio["byte_length"]
-        .as_u64()
-        .expect("byte_length should be present") as usize;
-    assert!(byte_length > 0);
-    assert_eq!(byte_length % 2, 0);
-
-    let bytes = sidecar.read_exact_stdout_bytes(byte_length);
-    assert_eq!(bytes.len(), byte_length);
+    let _ = assert_audio_response(&mut sidecar);
 }
 
 #[test]
 #[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
-fn live_non_english_request_returns_audio() {
+fn live_british_english_request_returns_audio_and_exact_pcm_bytes() {
     let live_assets = LiveTestAssets::from_env();
+    let mut sidecar = spawn_ready_sidecar(&live_assets, None);
 
-    let mut sidecar = SidecarHarness::spawn_with_runtime_and_env(
-        &live_assets.espeak_runtime_dir,
-        None,
-        &[(
-            "ORT_DYLIB_PATH",
-            live_assets
-                .onnxruntime_dll
-                .to_str()
-                .expect("dll path should be utf-8"),
-        )],
-    );
+    sidecar.send_json(request_for(
+        "Hello from Kokoro",
+        "bf_emma",
+        &live_assets.model_dir,
+    ));
 
-    let ready = sidecar.read_json_line();
-    assert_eq!(ready["type"], "ready");
+    let _ = assert_audio_response(&mut sidecar);
+}
+
+#[test]
+#[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
+fn live_spanish_request_returns_audio() {
+    let live_assets = LiveTestAssets::from_env();
+    let mut sidecar = spawn_ready_sidecar(&live_assets, None);
 
     sidecar.send_json(request_for(
         "Hola desde Kokoro",
@@ -127,35 +124,59 @@ fn live_non_english_request_returns_audio() {
         &live_assets.model_dir,
     ));
 
-    let audio = sidecar.read_json_line();
-    assert_eq!(audio["type"], "audio");
+    let _ = assert_audio_response(&mut sidecar);
+}
 
-    let byte_length = audio["byte_length"]
-        .as_u64()
-        .expect("byte_length should be present") as usize;
-    let bytes = sidecar.read_exact_stdout_bytes(byte_length);
-    assert_eq!(bytes.len(), byte_length);
+#[test]
+#[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
+fn live_french_request_returns_audio() {
+    let live_assets = LiveTestAssets::from_env();
+    let mut sidecar = spawn_ready_sidecar(&live_assets, None);
+
+    sidecar.send_json(request_for(
+        "Bonjour depuis Kokoro",
+        "ff_siwis",
+        &live_assets.model_dir,
+    ));
+
+    let _ = assert_audio_response(&mut sidecar);
+}
+
+#[test]
+#[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
+fn live_hindi_request_returns_audio() {
+    let live_assets = LiveTestAssets::from_env();
+    let mut sidecar = spawn_ready_sidecar(&live_assets, None);
+
+    sidecar.send_json(request_for(
+        "Namaste from Kokoro",
+        "hf_alpha",
+        &live_assets.model_dir,
+    ));
+
+    let _ = assert_audio_response(&mut sidecar);
+}
+
+#[test]
+#[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
+fn live_italian_request_returns_audio() {
+    let live_assets = LiveTestAssets::from_env();
+    let mut sidecar = spawn_ready_sidecar(&live_assets, None);
+
+    sidecar.send_json(request_for(
+        "Ciao da Kokoro",
+        "if_sara",
+        &live_assets.model_dir,
+    ));
+
+    let _ = assert_audio_response(&mut sidecar);
 }
 
 #[test]
 #[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
 fn live_brazilian_portuguese_request_returns_audio() {
     let live_assets = LiveTestAssets::from_env();
-
-    let mut sidecar = SidecarHarness::spawn_with_runtime_and_env(
-        &live_assets.espeak_runtime_dir,
-        None,
-        &[(
-            "ORT_DYLIB_PATH",
-            live_assets
-                .onnxruntime_dll
-                .to_str()
-                .expect("dll path should be utf-8"),
-        )],
-    );
-
-    let ready = sidecar.read_json_line();
-    assert_eq!(ready["type"], "ready");
+    let mut sidecar = spawn_ready_sidecar(&live_assets, None);
 
     sidecar.send_json(request_for(
         "Ola do Kokoro",
@@ -163,61 +184,28 @@ fn live_brazilian_portuguese_request_returns_audio() {
         &live_assets.model_dir,
     ));
 
-    let audio = sidecar.read_json_line();
-    assert_eq!(audio["type"], "audio");
-
-    let byte_length = audio["byte_length"]
-        .as_u64()
-        .expect("byte_length should be present") as usize;
-    let bytes = sidecar.read_exact_stdout_bytes(byte_length);
-    assert_eq!(bytes.len(), byte_length);
+    let _ = assert_audio_response(&mut sidecar);
 }
 
 #[test]
 #[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
 fn live_same_process_requests_both_succeed_and_keep_streams_separated() {
     let live_assets = LiveTestAssets::from_env();
-
-    let mut sidecar = SidecarHarness::spawn_with_runtime_and_env(
-        &live_assets.espeak_runtime_dir,
-        Some("debug"),
-        &[(
-            "ORT_DYLIB_PATH",
-            live_assets
-                .onnxruntime_dll
-                .to_str()
-                .expect("dll path should be utf-8"),
-        )],
-    );
-
-    let ready = sidecar.read_json_line();
-    assert_eq!(ready["type"], "ready");
+    let mut sidecar = spawn_ready_sidecar(&live_assets, Some("debug"));
 
     sidecar.send_json(request_for(
         "Hello from Kokoro",
         "af_heart",
         &live_assets.model_dir,
     ));
-    let first = sidecar.read_json_line();
-    assert_eq!(first["type"], "audio");
-    let first_len = first["byte_length"]
-        .as_u64()
-        .expect("first byte_length should be present") as usize;
-    let first_bytes = sidecar.read_exact_stdout_bytes(first_len);
-    assert_eq!(first_bytes.len(), first_len);
+    let _ = assert_audio_response(&mut sidecar);
 
     sidecar.send_json(request_for(
         "Hola desde Kokoro",
         "ef_dora",
         &live_assets.model_dir,
     ));
-    let second = sidecar.read_json_line();
-    assert_eq!(second["type"], "audio");
-    let second_len = second["byte_length"]
-        .as_u64()
-        .expect("second byte_length should be present") as usize;
-    let second_bytes = sidecar.read_exact_stdout_bytes(second_len);
-    assert_eq!(second_bytes.len(), second_len);
+    let _ = assert_audio_response(&mut sidecar);
 
     sidecar.close_stdin();
     let remaining_stdout = sidecar.read_remaining_stdout();
@@ -233,110 +221,13 @@ fn live_same_process_requests_both_succeed_and_keep_streams_separated() {
 
 #[test]
 #[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
-fn live_english_families_cover_american_and_british_voices() {
-    let live_assets = LiveTestAssets::from_env();
-
-    let mut sidecar = SidecarHarness::spawn_with_runtime_and_env(
-        &live_assets.espeak_runtime_dir,
-        None,
-        &[(
-            "ORT_DYLIB_PATH",
-            live_assets
-                .onnxruntime_dll
-                .to_str()
-                .expect("dll path should be utf-8"),
-        )],
-    );
-
-    let ready = sidecar.read_json_line();
-    assert_eq!(ready["type"], "ready");
-
-    for (text, voice) in [
-        ("Hello from Kokoro", "af_heart"),
-        ("Hello from Kokoro", "bf_emma"),
-    ] {
-        sidecar.send_json(request_for(text, voice, &live_assets.model_dir));
-        let audio = sidecar.read_json_line();
-        assert_eq!(audio["type"], "audio");
-        let byte_length = audio["byte_length"]
-            .as_u64()
-            .expect("byte_length should be present") as usize;
-        let bytes = sidecar.read_exact_stdout_bytes(byte_length);
-        assert_eq!(bytes.len(), byte_length);
-    }
-}
-
-#[test]
-#[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
-fn live_supported_language_families_reach_audio() {
-    let live_assets = LiveTestAssets::from_env();
-
-    let mut sidecar = SidecarHarness::spawn_with_runtime_and_env(
-        &live_assets.espeak_runtime_dir,
-        None,
-        &[(
-            "ORT_DYLIB_PATH",
-            live_assets
-                .onnxruntime_dll
-                .to_str()
-                .expect("dll path should be utf-8"),
-        )],
-    );
-
-    let ready = sidecar.read_json_line();
-    assert_eq!(ready["type"], "ready");
-
-    let cases = [
-        ("Hello from Kokoro", "af_heart"),
-        ("Hello from Kokoro", "bf_emma"),
-        ("Hola desde Kokoro", "ef_dora"),
-        ("Bonjour depuis Kokoro", "ff_siwis"),
-        ("Namaste from Kokoro", "hf_alpha"),
-        ("Ciao da Kokoro", "if_sara"),
-        ("Ola do Kokoro", "pf_dora"),
-    ];
-
-    for (text, voice) in cases {
-        sidecar.send_json(request_for(text, voice, &live_assets.model_dir));
-        let audio = sidecar.read_json_line();
-        assert_eq!(audio["type"], "audio");
-        let byte_length = audio["byte_length"]
-            .as_u64()
-            .expect("byte_length should be present") as usize;
-        let bytes = sidecar.read_exact_stdout_bytes(byte_length);
-        assert_eq!(bytes.len(), byte_length);
-    }
-}
-
-#[test]
-#[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
 fn live_cache_hit_is_logged_on_second_same_voice_request() {
     let live_assets = LiveTestAssets::from_env();
-
-    let mut sidecar = SidecarHarness::spawn_with_runtime_and_env(
-        &live_assets.espeak_runtime_dir,
-        Some("debug"),
-        &[(
-            "ORT_DYLIB_PATH",
-            live_assets
-                .onnxruntime_dll
-                .to_str()
-                .expect("dll path should be utf-8"),
-        )],
-    );
-
-    let ready = sidecar.read_json_line();
-    assert_eq!(ready["type"], "ready");
+    let mut sidecar = spawn_ready_sidecar(&live_assets, Some("debug"));
 
     for text in ["Hello from Kokoro", "Hello again from Kokoro"] {
         sidecar.send_json(request_for(text, "af_heart", &live_assets.model_dir));
-        let audio = sidecar.read_json_line();
-        assert_eq!(audio["type"], "audio");
-        let byte_length = audio["byte_length"]
-            .as_u64()
-            .expect("byte_length should be present") as usize;
-        let bytes = sidecar.read_exact_stdout_bytes(byte_length);
-        assert_eq!(bytes.len(), byte_length);
+        let _ = assert_audio_response(&mut sidecar);
     }
 
     let stderr = sidecar.shutdown_and_collect_stderr();
@@ -348,21 +239,7 @@ fn live_cache_hit_is_logged_on_second_same_voice_request() {
 #[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
 fn live_speed_parameter_changes_byte_length() {
     let live_assets = LiveTestAssets::from_env();
-
-    let mut sidecar = SidecarHarness::spawn_with_runtime_and_env(
-        &live_assets.espeak_runtime_dir,
-        None,
-        &[(
-            "ORT_DYLIB_PATH",
-            live_assets
-                .onnxruntime_dll
-                .to_str()
-                .expect("dll path should be utf-8"),
-        )],
-    );
-
-    let ready = sidecar.read_json_line();
-    assert_eq!(ready["type"], "ready");
+    let mut sidecar = spawn_ready_sidecar(&live_assets, None);
 
     let slow_request = json!({
         "text": "Hello from Kokoro",
@@ -371,13 +248,7 @@ fn live_speed_parameter_changes_byte_length() {
         "model_dir": live_assets.model_dir,
     });
     sidecar.send_json(slow_request);
-    let slow = sidecar.read_json_line();
-    assert_eq!(slow["type"], "audio");
-    let slow_len = slow["byte_length"]
-        .as_u64()
-        .expect("slow byte_length should be present") as usize;
-    let slow_bytes = sidecar.read_exact_stdout_bytes(slow_len);
-    assert_eq!(slow_bytes.len(), slow_len);
+    let slow_len = assert_audio_response(&mut sidecar);
 
     let fast_request = json!({
         "text": "Hello from Kokoro",
@@ -386,16 +257,13 @@ fn live_speed_parameter_changes_byte_length() {
         "model_dir": live_assets.model_dir,
     });
     sidecar.send_json(fast_request);
-    let fast = sidecar.read_json_line();
-    assert_eq!(fast["type"], "audio");
-    let fast_len = fast["byte_length"]
-        .as_u64()
-        .expect("fast byte_length should be present") as usize;
-    let fast_bytes = sidecar.read_exact_stdout_bytes(fast_len);
-    assert_eq!(fast_bytes.len(), fast_len);
+    let fast_len = assert_audio_response(&mut sidecar);
 
     assert_ne!(slow_len, fast_len);
-    assert!(slow_len > fast_len, "slower speech should produce more samples");
+    assert!(
+        slow_len > fast_len,
+        "slower speech should produce more samples"
+    );
 }
 
 #[test]
@@ -411,20 +279,7 @@ fn live_model_dir_with_spaces_and_non_ascii_succeeds() {
         fs::copy(entry.path(), destination).expect("model asset should copy");
     }
 
-    let mut sidecar = SidecarHarness::spawn_with_runtime_and_env(
-        &live_assets.espeak_runtime_dir,
-        None,
-        &[(
-            "ORT_DYLIB_PATH",
-            live_assets
-                .onnxruntime_dll
-                .to_str()
-                .expect("dll path should be utf-8"),
-        )],
-    );
-
-    let ready = sidecar.read_json_line();
-    assert_eq!(ready["type"], "ready");
+    let mut sidecar = spawn_ready_sidecar(&live_assets, None);
 
     sidecar.send_json(request_for(
         "Hello from Kokoro",
@@ -432,13 +287,7 @@ fn live_model_dir_with_spaces_and_non_ascii_succeeds() {
         &special_model_dir,
     ));
 
-    let audio = sidecar.read_json_line();
-    assert_eq!(audio["type"], "audio");
-    let byte_length = audio["byte_length"]
-        .as_u64()
-        .expect("byte_length should be present") as usize;
-    let bytes = sidecar.read_exact_stdout_bytes(byte_length);
-    assert_eq!(bytes.len(), byte_length);
+    let _ = assert_audio_response(&mut sidecar);
 
     let _ = fs::remove_dir_all(&special_model_dir);
 }
