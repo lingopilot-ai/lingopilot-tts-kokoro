@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use lingopilot_tts_kokoro::live_test_support::LiveTestAssets;
-use lingopilot_tts_kokoro::synthesis::{resolve_model_assets, SynthesisCache};
+use lingopilot_tts_kokoro::synthesis::{resolve_model_assets, ExecutionProvider, SynthesisCache};
 
 // Fixture word counts were picked so that Kokoro's generated PCM16 duration
 // lands within ~10% of the target. Calibrate at implementation time.
@@ -52,7 +52,10 @@ fn bench_synth(c: &mut Criterion) {
     let assets = LiveTestAssets::from_env();
     assets.install_onnxruntime_env();
 
-    let mut cache = SynthesisCache::new(assets.espeak_runtime_dir.join("espeak-ng-data"));
+    let mut cache = SynthesisCache::new(
+        assets.espeak_runtime_dir.join("espeak-ng-data"),
+        ExecutionProvider::Cpu,
+    );
 
     let mut group = c.benchmark_group("synth");
     group.sample_size(50);
