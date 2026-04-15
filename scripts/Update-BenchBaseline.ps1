@@ -14,7 +14,14 @@
 param(
     [string]$BaselineName = 'v0.1.0',
     [string]$Version = '0.1.0',
-    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+    [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path,
+    # Skip running `cargo bench` and reuse an existing `target/criterion` tree.
+    # Intended for rotating the baseline from a CI artifact captured on the
+    # runner hardware class declared in this backlog's E-03 AC (e.g. downloaded
+    # from the `windows-bench-criterion-<run_id>` artifact and extracted into
+    # `target/criterion/`). The PR rotating the baseline must document the
+    # source run.
+    [switch]$SkipBench
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,14 +30,21 @@ Set-StrictMode -Version Latest
 $baselinePath = Join-Path $RepoRoot 'benches/baseline.json'
 $criterionRoot = Join-Path $RepoRoot 'target/criterion'
 
-Push-Location $RepoRoot
-try {
-    & cargo bench --bench synth -- --save-baseline $BaselineName
-    if ($LASTEXITCODE -ne 0) {
-        throw "cargo bench failed with exit code $LASTEXITCODE"
+if ($SkipBench) {
+    if (-not (Test-Path $criterionRoot)) {
+        throw "-SkipBench was set but $criterionRoot does not exist. Extract the CI criterion artifact into target/criterion/ first."
     }
-} finally {
-    Pop-Location
+    Write-Host "Skipping cargo bench; reusing existing $criterionRoot."
+} else {
+    Push-Location $RepoRoot
+    try {
+        & cargo bench --bench synth -- --save-baseline $BaselineName
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo bench failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        Pop-Location
+    }
 }
 
 function Convert-SecondsToMs {
