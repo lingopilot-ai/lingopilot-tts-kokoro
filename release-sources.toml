@@ -9,7 +9,7 @@
 # its sha256 is empty, staging emits a warning and skips verification.
 
 [kokoro_model]
-url = "https://github.com/lingopilot-ai/lingopilot-tts-kokoro-assets/releases/download/v0.1.0/kokoro-model-v0.1.0.zip"
+url = "https://github.com/lingopilot-ai/lingopilot-tts-kokoro/releases/download/kokoro-model-assets-v1.0/kokoro-model.zip"
 sha256 = ""
 
 [onnxruntime]
