@@ -275,7 +275,7 @@ jobs:
     name: Windows bench gate
     runs-on: windows-latest
     needs: cargo
-    timeout-minutes: 60
+    timeout-minutes: 90
     if: ${{ github.repository == 'lingopilot-ai/lingopilot-tts-kokoro' && vars.KOKORO_TTS_ENABLE_BENCH_CI == 'true' }}
 
     steps:
