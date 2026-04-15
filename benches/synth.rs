@@ -52,10 +52,7 @@ fn bench_synth(c: &mut Criterion) {
     let assets = LiveTestAssets::from_env();
     assets.install_onnxruntime_env();
 
-    let mut cache = SynthesisCache::new(
-        assets.espeak_runtime_dir.join("espeak-ng-data"),
-        ExecutionProvider::Cpu,
-    );
+    let mut cache = SynthesisCache::new(assets.espeak_runtime_dir.clone(), ExecutionProvider::Cpu);
 
     let mut group = c.benchmark_group("synth");
     group.sample_size(50);
