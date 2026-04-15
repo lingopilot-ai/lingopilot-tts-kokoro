@@ -291,10 +291,10 @@ Recommended Windows command:
 Equivalent direct command:
 
 ```bash
-cargo test --locked -- --ignored
+cargo test --locked -- --ignored --test-threads=1
 ```
 
-The helper script validates the live paths before invoking the ignored suite. Real Kokoro assets remain external and are not committed to this repository.
+The helper script validates the live paths before invoking the ignored suite serially with `--test-threads=1`, because the Windows eSpeak-backed live checks are not thread-safe inside one test process. Real Kokoro assets remain external and are not committed to this repository.
 
 ## GitHub CI Asset Configuration
 
@@ -386,7 +386,7 @@ To verify a packaged archive after `dist\` has been produced:
 .\scripts\Verify-Readiness.ps1 -Packaged
 ```
 
-The Windows CI live-assets gate follows the same sequence with real assets: build, stage, run `cargo test --locked -- --ignored`, package, and then call `Verify-Readiness.ps1 -Packaged`.
+The Windows CI live-assets gate follows the same sequence with real assets: build, stage, run `cargo test --locked -- --ignored --test-threads=1`, package, and then call `Verify-Readiness.ps1 -Packaged`.
 
 The release workflow adds one final published-artifact check after upload:
 `scripts\Test-PublishedRelease.ps1` must be able to download the new release

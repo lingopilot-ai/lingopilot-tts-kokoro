@@ -154,7 +154,7 @@ try {
         $env:KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR = $liveAssets.RuntimeDir
         $env:KOKORO_TTS_LIVE_MODEL_DIR = $liveAssets.ModelDir
         $env:KOKORO_TTS_LIVE_ONNXRUNTIME_DLL = $liveAssets.OnnxRuntimeDll
-        cargo test --locked -- --ignored
+        cargo test --locked -- --ignored --test-threads=1
     }
 
     if ($Packaged) {

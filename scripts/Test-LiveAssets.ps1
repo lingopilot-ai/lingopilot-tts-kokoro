@@ -100,7 +100,7 @@ $env:KOKORO_TTS_LIVE_ONNXRUNTIME_DLL = $resolvedOnnxRuntimeDll
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Push-Location $repoRoot
 try {
-    cargo test --locked -- --ignored
+    cargo test --locked -- --ignored --test-threads=1
 }
 finally {
     Pop-Location

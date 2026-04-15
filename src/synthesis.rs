@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use libloading::Library;
-use ndarray::{Array2, ArrayD, Ix2};
+use ndarray::{Array2, Array3, ArrayD, Axis, Ix2, Ix3};
 use ndarray_npy::NpzReader;
 use ort::session::Session;
 use ort::value::{Tensor, TensorElementType};
@@ -777,7 +777,7 @@ fn resolve_voice_profile(voice_id: &str) -> Result<ResolvedVoice, String> {
     {
         ("a", false, Some("en-us"))
     } else if trimmed.starts_with("bf_") || trimmed.starts_with("bm_") {
-        ("b", true, Some("en-gb"))
+        ("b", true, Some("en"))
     } else if trimmed.starts_with("jf_") || trimmed.starts_with("jm_") {
         ("j", false, None)
     } else if trimmed.starts_with("zf_") || trimmed.starts_with("zm_") {
@@ -785,7 +785,7 @@ fn resolve_voice_profile(voice_id: &str) -> Result<ResolvedVoice, String> {
     } else if trimmed.starts_with("ef_") || trimmed.starts_with("em_") {
         ("e", false, Some("es"))
     } else if trimmed.starts_with("ff_") {
-        ("f", false, Some("fr-fr"))
+        ("f", false, Some("fr"))
     } else if trimmed.starts_with("hf_") || trimmed.starts_with("hm_") {
         ("h", false, Some("hi"))
     } else if trimmed.starts_with("if_") || trimmed.starts_with("im_") {
@@ -907,13 +907,7 @@ fn load_voice_styles(voices_path: &Path) -> Result<HashMap<String, Array2<f32>>,
                 error
             )
         })?;
-        let matrix = array.into_dimensionality::<Ix2>().map_err(|_| {
-            format!(
-                "Cannot use voice '{}' from bundle '{}': expected a 2D style matrix",
-                name,
-                voices_path.display()
-            )
-        })?;
+        let matrix = voice_style_matrix_from_array(array, &name, voices_path)?;
         if matrix.nrows() == 0 || matrix.ncols() == 0 {
             return Err(format!(
                 "Cannot use voice '{}' from bundle '{}': style matrix must not be empty",
@@ -925,6 +919,43 @@ fn load_voice_styles(voices_path: &Path) -> Result<HashMap<String, Array2<f32>>,
     }
 
     Ok(styles)
+}
+
+fn voice_style_matrix_from_array(
+    array: ArrayD<f32>,
+    voice_name: &str,
+    voices_path: &Path,
+) -> Result<Array2<f32>, String> {
+    if let Ok(matrix) = array.clone().into_dimensionality::<Ix2>() {
+        return Ok(matrix);
+    }
+
+    if let Ok(tensor) = array.into_dimensionality::<Ix3>() {
+        return squeeze_voice_style_tensor(tensor, voice_name, voices_path);
+    }
+
+    Err(format!(
+        "Cannot use voice '{}' from bundle '{}': expected a 2D style matrix or a 3D tensor with singleton axis 1",
+        voice_name,
+        voices_path.display()
+    ))
+}
+
+fn squeeze_voice_style_tensor(
+    tensor: Array3<f32>,
+    voice_name: &str,
+    voices_path: &Path,
+) -> Result<Array2<f32>, String> {
+    if tensor.shape()[1] != 1 {
+        return Err(format!(
+            "Cannot use voice '{}' from bundle '{}': expected singleton axis 1 in 3D style tensor, found shape {:?}",
+            voice_name,
+            voices_path.display(),
+            tensor.shape()
+        ));
+    }
+
+    Ok(tensor.index_axis_move(Axis(1), 0))
 }
 
 fn detect_style_input_kind(input: &ort::value::Outlet) -> Result<StyleInputKind, String> {
@@ -1303,7 +1334,7 @@ mod tests {
     };
     use crate::kokoro_vocab;
     use crate::live_test_support::LiveTestAssets;
-    use ndarray::arr2;
+    use ndarray::{arr2, Array3};
     use ndarray_npy::NpzWriter;
     use std::fs::{self, File};
     use std::path::{Path, PathBuf};
@@ -1431,6 +1462,21 @@ mod tests {
         npz.finish().expect("npz should finish");
     }
 
+    fn create_voice_npz_with_singleton_middle_axis(path: &Path) {
+        let file = File::create(path).expect("npz file should be created");
+        let mut npz = NpzWriter::new(file);
+        let style = Array3::from_shape_vec(
+            (3, 1, 3),
+            vec![
+                0.1_f32, 0.2_f32, 0.3_f32, 1.1_f32, 1.2_f32, 1.3_f32, 2.1_f32, 2.2_f32, 2.3_f32,
+            ],
+        )
+        .expect("3D style tensor should be created");
+        npz.add_array("af_alloy", &style)
+            .expect("voice should be written");
+        npz.finish().expect("npz should finish");
+    }
+
     fn unique_missing_path(prefix: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "lingopilot-tts-kokoro-{prefix}-{}-{}",
@@ -1445,11 +1491,13 @@ mod tests {
     fn resolved_assets_for_voice(voice_id: &str) -> ResolvedModelAssets {
         let (lang_code, british, espeak_voice) =
             if voice_id.starts_with("bf_") || voice_id.starts_with("bm_") {
-                ("b", true, Some("en-gb"))
+                ("b", true, Some("en"))
             } else if voice_id.starts_with("af_") || voice_id.starts_with("am_") {
                 ("a", false, Some("en-us"))
             } else if voice_id.starts_with("ef_") || voice_id.starts_with("em_") {
                 ("e", false, Some("es"))
+            } else if voice_id.starts_with("ff_") {
+                ("f", false, Some("fr"))
             } else if voice_id.starts_with("zf_") || voice_id.starts_with("zm_") {
                 ("z", false, None)
             } else {
@@ -1641,7 +1689,7 @@ mod tests {
                 voice_id: "bf_emma".to_string(),
                 lang_code: "b",
                 british: true,
-                espeak_voice: Some("en-gb"),
+                espeak_voice: Some("en"),
             }
         );
     }
@@ -1656,6 +1704,18 @@ mod tests {
 
         assert_eq!(resolved.voice.lang_code, "e");
         assert_eq!(resolved.voice.espeak_voice, Some("es"));
+    }
+
+    #[test]
+    fn resolves_french_voice_with_explicit_espeak_fallback() {
+        let temp_dir = TempDir::new("resolve-french");
+        create_kokoro_bundle(temp_dir.path());
+
+        let resolved =
+            resolve_model_assets(temp_dir.path(), "ff_siwis").expect("bundle should resolve");
+
+        assert_eq!(resolved.voice.lang_code, "f");
+        assert_eq!(resolved.voice.espeak_voice, Some("fr"));
     }
 
     #[test]
@@ -1745,6 +1805,19 @@ mod tests {
         assert_eq!(styles.len(), 2);
         assert_eq!(styles["af_heart"].shape(), &[3, 3]);
         assert_eq!(styles["af_heart"][[1, 0]], 1.1_f32);
+    }
+
+    #[test]
+    fn loads_voice_styles_from_npz_bundle_with_singleton_middle_axis() {
+        let temp_dir = TempDir::new("voice-bundle-3d");
+        let voices_path = temp_dir.path().join("voices-v1.0.bin");
+        create_voice_npz_with_singleton_middle_axis(&voices_path);
+
+        let styles = load_voice_styles(&voices_path).expect("voice styles should load");
+
+        assert_eq!(styles.len(), 1);
+        assert_eq!(styles["af_alloy"].shape(), &[3, 3]);
+        assert_eq!(styles["af_alloy"][[1, 0]], 1.1_f32);
     }
 
     #[test]
