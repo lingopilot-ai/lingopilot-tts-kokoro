@@ -285,6 +285,7 @@ fn build_script_test_workspace() -> TempDir {
     copy_workspace_file(&workspace, &["packaging", "windows", "README.md"]);
     copy_workspace_file(&workspace, &["scripts", "Stage-WindowsReleaseAssets.ps1"]);
     copy_workspace_file(&workspace, &["scripts", "Package-WindowsRelease.ps1"]);
+    copy_workspace_file(&workspace, &["scripts", "ReleasePackaging.Common.ps1"]);
 
     let release_dir = workspace.path().join("target").join("release");
     fs::create_dir_all(&release_dir).expect("release dir should be created");
