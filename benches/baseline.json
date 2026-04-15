@@ -1,0 +1,23 @@
+{
+  "version": "0.1.0",
+  "captured_at": "2026-04-15T00:00:00Z",
+  "runner_hardware": "github-hosted windows-latest (Azure Standard_D4ads_v5, 4 vCPU AMD EPYC 7763, 16 GiB RAM)",
+  "pending_first_capture": true,
+  "measurements": {
+    "af_heart": {
+      "1s":  { "p50_ms": 0, "p95_ms": 0, "p99_ms": 0 },
+      "5s":  { "p50_ms": 0, "p95_ms": 0, "p99_ms": 0 },
+      "20s": { "p50_ms": 0, "p95_ms": 0, "p99_ms": 0 }
+    },
+    "pf_dora": {
+      "1s":  { "p50_ms": 0, "p95_ms": 0, "p99_ms": 0 },
+      "5s":  { "p50_ms": 0, "p95_ms": 0, "p99_ms": 0 },
+      "20s": { "p50_ms": 0, "p95_ms": 0, "p99_ms": 0 }
+    },
+    "ef_alice": {
+      "1s":  { "p50_ms": 0, "p95_ms": 0, "p99_ms": 0 },
+      "5s":  { "p50_ms": 0, "p95_ms": 0, "p99_ms": 0 },
+      "20s": { "p50_ms": 0, "p95_ms": 0, "p99_ms": 0 }
+    }
+  }
+}

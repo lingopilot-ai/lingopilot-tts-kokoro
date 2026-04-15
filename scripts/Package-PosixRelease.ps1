@@ -14,7 +14,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$EspeakRuntimeDir,
     [string]$Version,
-    [string]$OutputDir = (Join-Path (Join-Path $PSScriptRoot "..") "dist")
+    [string]$OutputDir = (Join-Path (Join-Path $PSScriptRoot "..") "dist"),
+    [switch]$StageOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -133,6 +134,13 @@ Copy-Item -LiteralPath $resolvedVoicesPath -Destination (Join-Path $packageModel
 Copy-Item -LiteralPath $readmePath -Destination (Join-Path $packageRoot "README.md")
 Copy-Item -LiteralPath $licensePath -Destination (Join-Path $packageRoot "LICENSE")
 Copy-Item -LiteralPath $thirdPartyLicensesPath -Destination (Join-Path $packageRoot "THIRD_PARTY_LICENSES.txt")
+
+if ($StageOnly) {
+    Write-Host "Staged POSIX release tree (archive + checksum skipped): $packageRoot" -ForegroundColor Green
+    # Emit staged directory path as the final stdout line so CI can consume it.
+    Write-Output $packageRoot
+    return
+}
 
 New-TarGzArchive -SourceDirectory $packageRoot -ArchivePath $archivePath
 Update-ChecksumManifest -ChecksumPath $checksumPath -AssetPath $archivePath

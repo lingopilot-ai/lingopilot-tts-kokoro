@@ -221,6 +221,50 @@ fn live_same_process_requests_both_succeed_and_keep_streams_separated() {
 
 #[test]
 #[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
+fn live_successful_request_emits_timing_events() {
+    let live_assets = LiveTestAssets::from_env();
+    let mut sidecar = spawn_ready_sidecar(&live_assets, Some("info"));
+
+    sidecar.send_json(request_for(
+        "Hello from Kokoro",
+        "af_heart",
+        &live_assets.model_dir,
+    ));
+    let _ = assert_audio_response(&mut sidecar);
+
+    let stderr = sidecar.shutdown_and_collect_stderr();
+    assert_stderr_is_plain_text(&stderr);
+
+    for needle in [
+        "level=INFO event=phonemization_done",
+        "level=INFO event=model_loaded",
+        "level=INFO event=inference_done",
+    ] {
+        assert!(
+            stderr.contains(needle),
+            "stderr must contain `{needle}`; got:\n{stderr}"
+        );
+    }
+
+    for line in stderr.lines().filter(|l| {
+        l.contains("event=phonemization_done")
+            || l.contains("event=model_loaded")
+            || l.contains("event=inference_done")
+    }) {
+        let idx = line
+            .find("duration_ms=")
+            .unwrap_or_else(|| panic!("timing line missing duration_ms: {line}"));
+        let tail = &line[idx + "duration_ms=".len()..];
+        let first = tail.chars().next().expect("duration_ms value must exist");
+        assert!(
+            first.is_ascii_digit(),
+            "duration_ms value must start with a digit: {line}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
 fn live_cache_hit_is_logged_on_second_same_voice_request() {
     let live_assets = LiveTestAssets::from_env();
     let mut sidecar = spawn_ready_sidecar(&live_assets, Some("debug"));

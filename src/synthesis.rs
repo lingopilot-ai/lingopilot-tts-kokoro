@@ -4,6 +4,7 @@ use std::fs::{self, File};
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use libloading::Library;
 use ndarray::{Array2, Array3, ArrayD, Axis, Ix2, Ix3};
@@ -91,6 +92,14 @@ trait KokoroRuntime: Send {
     ) -> Result<Vec<f32>, String>;
 }
 
+/// Execution provider selected at startup. CPU is the default and release floor;
+/// DirectML is an explicit, Windows-only opt-in (see `AGENTS.md §10.2`).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ExecutionProvider {
+    Cpu,
+    DirectMl,
+}
+
 /// Process-owned synthesis state.
 pub struct SynthesisCache {
     phonemizer: Box<dyn Phonemizer>,
@@ -99,10 +108,10 @@ pub struct SynthesisCache {
 }
 
 impl SynthesisCache {
-    pub fn new(espeak_data_dir: PathBuf) -> Self {
+    pub fn new(espeak_data_dir: PathBuf, execution_provider: ExecutionProvider) -> Self {
         Self::with_components(
             Box::new(EspeakPhonemizer::new(espeak_data_dir)),
-            Box::new(OrtRuntimeFactory),
+            Box::new(OrtRuntimeFactory { execution_provider }),
         )
     }
 
@@ -123,7 +132,9 @@ impl SynthesisCache {
         assets: &ResolvedModelAssets,
         speed: f32,
     ) -> Result<SynthResult, String> {
+        let phonemize_start = Instant::now();
         let phonemes = self.phonemizer.phonemize(text, &assets.voice)?;
+        let phonemize_elapsed = phonemize_start.elapsed();
         let phoneme_chunks = split_phonemes_for_inference(&phonemes.phonemes);
         if phoneme_chunks.is_empty() {
             return Err(format!(
@@ -139,16 +150,30 @@ impl SynthesisCache {
             phoneme_len = phonemes.phonemes.chars().count(),
             chunk_count = phoneme_chunks.len()
         );
+        tracing::info!(
+            event = "phonemization_done",
+            voice = assets.voice.voice_id.as_str(),
+            duration_ms = phonemize_elapsed.as_millis() as u64
+        );
 
+        let voice_id = assets.voice.voice_id.clone();
+        let chunk_count = phoneme_chunks.len();
         let runtime = self.runtime_mut(assets)?;
         let mut samples = Vec::new();
 
+        let inference_start = Instant::now();
         for chunk in phoneme_chunks {
             let token_ids = tokenize_phonemes(&chunk)?;
-            let audio_chunk =
-                runtime.synthesize_chunk(&assets.voice.voice_id, &token_ids, speed)?;
+            let audio_chunk = runtime.synthesize_chunk(&voice_id, &token_ids, speed)?;
             samples.extend(audio_chunk);
         }
+        let inference_elapsed = inference_start.elapsed();
+        tracing::info!(
+            event = "inference_done",
+            voice = voice_id.as_str(),
+            chunk_count = chunk_count,
+            duration_ms = inference_elapsed.as_millis() as u64
+        );
 
         Ok(SynthResult {
             pcm16: float_audio_to_pcm16(&samples),
@@ -167,8 +192,14 @@ impl SynthesisCache {
                 model_path = assets.model_path.display().to_string(),
                 voices_path = assets.voices_path.display().to_string()
             );
+            let load_start = Instant::now();
             let runtime = self.runtime_factory.load(assets)?;
+            let load_elapsed = load_start.elapsed();
             self.runtimes.insert(key.clone(), runtime);
+            tracing::info!(
+                event = "model_loaded",
+                duration_ms = load_elapsed.as_millis() as u64
+            );
         } else {
             tracing::debug!(
                 event = "kokoro_runtime_cache_hit",
@@ -385,11 +416,13 @@ impl Drop for EspeakApi {
     }
 }
 
-struct OrtRuntimeFactory;
+struct OrtRuntimeFactory {
+    execution_provider: ExecutionProvider,
+}
 
 impl RuntimeFactory for OrtRuntimeFactory {
     fn load(&self, assets: &ResolvedModelAssets) -> Result<Box<dyn KokoroRuntime>, String> {
-        let runtime = OrtKokoroRuntime::load(assets)?;
+        let runtime = OrtKokoroRuntime::load(assets, self.execution_provider)?;
         runtime.ensure_voice_present(&assets.voice.voice_id)?;
         Ok(Box::new(runtime))
     }
@@ -495,13 +528,39 @@ impl RuntimeInputConfig {
 }
 
 impl OrtKokoroRuntime {
-    fn load(assets: &ResolvedModelAssets) -> Result<Self, String> {
+    fn load(
+        assets: &ResolvedModelAssets,
+        execution_provider: ExecutionProvider,
+    ) -> Result<Self, String> {
         ensure_onnxruntime_loaded()?;
+
+        // NO silent fallback to CPU on DirectML registration failure: per
+        // `AGENTS.md §10.2`, DirectML errors surface to the host through the
+        // normal "Synthesis failed:" envelope. Do not add a fallback here.
+        let providers = match execution_provider {
+            ExecutionProvider::Cpu => vec![ep::CPU::default().build()],
+            ExecutionProvider::DirectMl => {
+                #[cfg(target_os = "windows")]
+                {
+                    vec![ep::DirectML::default().with_device_id(0).build()]
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    unreachable!("directml rejected at startup on non-Windows");
+                }
+            }
+        };
+        let ep_label = match execution_provider {
+            ExecutionProvider::Cpu => "CPU",
+            ExecutionProvider::DirectMl => "DirectML",
+        };
 
         let session = Session::builder()
             .map_err(|error| format!("Cannot create ONNX Runtime session builder: {error}"))?
-            .with_execution_providers([ep::CPU::default().build()])
-            .map_err(|error| format!("Cannot configure Kokoro CPU execution provider: {error}"))?
+            .with_execution_providers(providers)
+            .map_err(|error| {
+                format!("Cannot configure Kokoro {ep_label} execution provider: {error}")
+            })?
             .commit_from_file(&assets.model_path)
             .map_err(|error| {
                 format!(
@@ -1329,8 +1388,8 @@ mod tests {
         platform_onnxruntime_library_name, resolve_espeak_library_path, resolve_model_assets,
         resolve_onnxruntime_library_path_for, split_phonemes_for_inference, tokenize_phonemes,
         validate_espeak_data_dir, validate_model_dir, KokoroRuntime, PhonemeResult,
-        ResolvedModelAssets, ResolvedVoice, RuntimeFactory, RuntimeKey, SynthesisCache,
-        ORT_DYLIB_PATH_ENV,
+        ExecutionProvider, ResolvedModelAssets, ResolvedVoice, RuntimeFactory, RuntimeKey,
+        SynthesisCache, ORT_DYLIB_PATH_ENV,
     };
     use crate::kokoro_vocab;
     use crate::live_test_support::LiveTestAssets;
@@ -1978,7 +2037,10 @@ mod tests {
         let live_assets = LiveTestAssets::from_env();
         live_assets.install_onnxruntime_env();
 
-        let mut cache = SynthesisCache::new(live_assets.espeak_runtime_dir.clone());
+        let mut cache = SynthesisCache::new(
+            live_assets.espeak_runtime_dir.clone(),
+            ExecutionProvider::Cpu,
+        );
         let assets = super::resolve_model_assets(&live_assets.model_dir, "af_heart")
             .expect("assets should resolve");
 
@@ -1996,13 +2058,38 @@ mod tests {
         let live_assets = LiveTestAssets::from_env();
         live_assets.install_onnxruntime_env();
 
-        let mut cache = SynthesisCache::new(live_assets.espeak_runtime_dir.clone());
+        let mut cache = SynthesisCache::new(
+            live_assets.espeak_runtime_dir.clone(),
+            ExecutionProvider::Cpu,
+        );
         let assets = super::resolve_model_assets(&live_assets.model_dir, "ef_dora")
             .expect("assets should resolve");
 
         let result = cache
             .synthesize("Hola desde Kokoro", &assets, 1.0)
             .expect("synthesis should succeed");
+
+        assert_eq!(result.sample_rate, kokoro_vocab::SAMPLE_RATE);
+        assert!(!result.pcm16.is_empty());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, Kokoro assets, and a DirectX 12 adapter"]
+    fn synthesize_af_heart_with_directml_end_to_end() {
+        let live_assets = LiveTestAssets::from_env();
+        live_assets.install_onnxruntime_env();
+
+        let mut cache = SynthesisCache::new(
+            live_assets.espeak_runtime_dir.clone(),
+            ExecutionProvider::DirectMl,
+        );
+        let assets = super::resolve_model_assets(&live_assets.model_dir, "af_heart")
+            .expect("assets should resolve");
+
+        let result = cache
+            .synthesize("Hello from Kokoro", &assets, 1.0)
+            .expect("DirectML synthesis should succeed");
 
         assert_eq!(result.sample_rate, kokoro_vocab::SAMPLE_RATE);
         assert!(!result.pcm16.is_empty());

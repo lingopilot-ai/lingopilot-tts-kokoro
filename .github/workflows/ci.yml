@@ -10,6 +10,27 @@ permissions:
   contents: read
 
 jobs:
+  supply-chain:
+    name: Supply chain
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo-audit
+        run: cargo audit --deny warnings
+
   cargo:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
@@ -31,11 +52,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Assert forbidden crates are absent from Cargo.lock
-        if: matrix.os != 'windows-latest'
-        shell: pwsh
-        run: .\scripts\Assert-ForbiddenCargoLockCrates.ps1
-
       - name: Run Windows readiness verification
         if: matrix.os == 'windows-latest'
         shell: pwsh
@@ -53,11 +69,8 @@ jobs:
     name: Windows live-assets verification
     runs-on: windows-latest
     needs: cargo
+    timeout-minutes: 45
     if: ${{ github.repository == 'lingopilot-ai/lingopilot-tts-kokoro' && vars.KOKORO_TTS_ENABLE_LIVE_ASSETS_CI == 'true' }}
-    env:
-      KOKORO_TTS_RELEASE_KOKORO_MODEL_URL: ${{ secrets.KOKORO_TTS_RELEASE_KOKORO_MODEL_URL }}
-      KOKORO_TTS_RELEASE_ONNXRUNTIME_URL: ${{ secrets.KOKORO_TTS_RELEASE_ONNXRUNTIME_URL }}
-      KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL: ${{ vars.KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL }}
 
     steps:
       - name: Check out repository
@@ -90,6 +103,13 @@ jobs:
         shell: pwsh
         run: cargo test --locked -- --ignored --test-threads=1
 
+      - name: Record Live Assets Gate pass in job summary
+        if: success()
+        shell: pwsh
+        run: |
+          "## Live Assets Gate: PASS" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "All ignored live-assets tests in ``tests/live_assets.rs`` executed green (AGENTS.md §8.2)." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
       - name: Package Windows release archive
         shell: pwsh
         run: .\scripts\Package-WindowsRelease.ps1
@@ -97,3 +117,202 @@ jobs:
       - name: Run packaged readiness verification
         shell: pwsh
         run: .\scripts\Verify-Readiness.ps1 -Packaged
+
+      - name: Upload staged assets on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-live-assets-failure-${{ github.run_id }}
+          path: |
+            packaging/windows/
+            target/release/*.zip
+          if-no-files-found: ignore
+          retention-days: 7
+
+  windows-directml-smoke:
+    name: Windows DirectML smoke (opportunistic)
+    runs-on: windows-latest
+    needs: cargo
+    timeout-minutes: 45
+    if: ${{ github.repository == 'lingopilot-ai/lingopilot-tts-kokoro' && vars.KOKORO_TTS_ENABLE_DIRECTML_CI == 'true' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate live-assets CI configuration
+        shell: pwsh
+        run: .\scripts\Assert-ReleaseAssetConfiguration.ps1
+
+      - name: Build release binary
+        shell: pwsh
+        run: cargo build --release --locked
+
+      - name: Stage release assets
+        shell: pwsh
+        run: .\scripts\Stage-WindowsReleaseAssets.ps1
+
+      - name: Expose staged live assets
+        shell: pwsh
+        run: |
+          $repoRoot = (Resolve-Path ".").Path
+          "KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR=$(Join-Path $repoRoot 'target\release\espeak-runtime')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "KOKORO_TTS_LIVE_MODEL_DIR=$(Join-Path $repoRoot 'packaging\windows\kokoro-model')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "KOKORO_TTS_LIVE_ONNXRUNTIME_DLL=$(Join-Path $repoRoot 'packaging\windows\onnxruntime.dll')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run DirectML end-to-end smoke test
+        shell: pwsh
+        run: cargo test --locked -- --ignored --test-threads=1 synthesize_af_heart_with_directml_end_to_end
+
+      - name: Record DirectML smoke result in job summary
+        if: success()
+        shell: pwsh
+        run: |
+          "## DirectML Smoke: PASS" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "Opportunistic-only; does not gate releases (AGENTS.md §10.2)." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+  posix-packaging-changes:
+    name: Detect posix packaging-relevant changes
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'pull_request' }}
+    outputs:
+      packaging: ${{ steps.filter.outputs.packaging }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Run path filter
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            packaging:
+              - 'scripts/Package-*.ps1'
+              - 'scripts/ReleasePackaging.Common.ps1'
+              - 'scripts/Stage-*.ps1'
+              - 'scripts/Assert-StagedLayout.ps1'
+              - 'release-sources.toml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+
+  posix-packaging-smoke:
+    name: Posix packaging smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: posix-packaging-changes
+    if: ${{ github.event_name == 'pull_request' && needs.posix-packaging-changes.outputs.packaging == 'true' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            architecture: x86_64
+          - os: macos-latest
+            platform: macos
+            architecture: aarch64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install espeak-ng (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libespeak-ng1 espeak-ng-data
+
+      - name: Install espeak-ng (macOS)
+        if: matrix.platform == 'macos'
+        run: brew install espeak-ng
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Stage POSIX release assets
+        shell: pwsh
+        run: ./scripts/Stage-PosixReleaseAssets.ps1 -Platform ${{ matrix.platform }} -Architecture ${{ matrix.architecture }}
+
+      - name: Run staging packager (stage only)
+        shell: pwsh
+        run: |
+          $scriptName = if ('${{ matrix.platform }}' -eq 'macos') { 'Package-MacOSRelease.ps1' } else { 'Package-LinuxRelease.ps1' }
+          $staged = & (Join-Path './scripts' $scriptName) `
+            -Architecture '${{ matrix.architecture }}' `
+            -BinaryPath $env:KOKORO_TTS_POSIX_BINARY `
+            -ModelDir $env:KOKORO_TTS_POSIX_MODEL_DIR `
+            -OnnxRuntimeLibrary $env:KOKORO_TTS_POSIX_ONNXRUNTIME_LIB `
+            -EspeakRuntimeDir $env:KOKORO_TTS_POSIX_ESPEAK_RUNTIME `
+            -StageOnly
+          $stagedDir = ($staged | Select-Object -Last 1).ToString().Trim()
+          "KOKORO_TTS_POSIX_STAGED_PACKAGE_DIR=$stagedDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Assert staged layout
+        shell: pwsh
+        run: ./scripts/Assert-StagedLayout.ps1 -StagingDir $env:KOKORO_TTS_POSIX_STAGED_PACKAGE_DIR -Platform ${{ matrix.platform }}
+
+      - name: Upload staged tree
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: posix-packaging-smoke-${{ matrix.platform }}-${{ github.run_id }}
+          path: ${{ env.KOKORO_TTS_POSIX_STAGED_PACKAGE_DIR }}
+          if-no-files-found: warn
+          retention-days: 7
+
+  windows-bench:
+    name: Windows bench gate
+    runs-on: windows-latest
+    needs: cargo
+    timeout-minutes: 60
+    if: ${{ github.repository == 'lingopilot-ai/lingopilot-tts-kokoro' && vars.KOKORO_TTS_ENABLE_BENCH_CI == 'true' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate live-assets CI configuration
+        shell: pwsh
+        run: .\scripts\Assert-ReleaseAssetConfiguration.ps1
+
+      - name: Build release binary
+        shell: pwsh
+        run: cargo build --release --locked
+
+      - name: Stage release assets
+        shell: pwsh
+        run: .\scripts\Stage-WindowsReleaseAssets.ps1
+
+      - name: Expose staged live assets
+        shell: pwsh
+        run: |
+          $repoRoot = (Resolve-Path ".").Path
+          "KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR=$(Join-Path $repoRoot 'target\release\espeak-runtime')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "KOKORO_TTS_LIVE_MODEL_DIR=$(Join-Path $repoRoot 'packaging\windows\kokoro-model')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "KOKORO_TTS_LIVE_ONNXRUNTIME_DLL=$(Join-Path $repoRoot 'packaging\windows\onnxruntime.dll')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run criterion bench
+        shell: pwsh
+        run: cargo bench --bench synth
+
+      - name: Compare against baseline
+        shell: pwsh
+        run: .\scripts\Compare-BenchBaseline.ps1
+
+      - name: Upload criterion reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bench-criterion-${{ github.run_id }}
+          path: target/criterion
+          if-no-files-found: warn
+          retention-days: 14

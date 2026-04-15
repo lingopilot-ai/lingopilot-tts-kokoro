@@ -18,7 +18,7 @@ Only Windows `x86_64` is a released artifact target today. Linux and macOS packa
 
 ## Current State
 
-This repository is still pre-release, but it is no longer a scaffold.
+This repository is `READY` for Windows `x86_64`: `v0.1.0` is published and smoke-tested end to end. Japanese and Mandarin synthesis, and Linux/macOS release artifacts, are explicitly deferred (see below).
 
 What works now:
 
@@ -31,6 +31,7 @@ What works now:
 - real English phonemization for `af_*` / `am_*` / `bf_*` / `bm_*`
 - deterministic eSpeak-backed phonemization for `ef_*` / `em_*`, `ff_*`, `hf_*` / `hm_*`, `if_*` / `im_*`, and `pf_*` / `pm_*`
 - Windows `v0.1.0` GitHub Release published and smoke-tested end to end
+- opt-in DirectML execution provider on Windows (CPU remains the default)
 
 What does not work yet:
 
@@ -145,7 +146,7 @@ Host                          Sidecar
 Start the sidecar with:
 
 ```text
-lingopilot-tts-kokoro --espeak-data-dir <absolute-path>
+lingopilot-tts-kokoro --espeak-data-dir <absolute-path> [--execution-provider cpu|directml]
 ```
 
 Rules:
@@ -155,7 +156,23 @@ Rules:
 - The directory must exist and contain `espeak-ng-data/`.
 - Supported phonemization paths additionally expect the platform eSpeak shared library in the same directory.
 - ONNX Runtime must be available either through `ORT_DYLIB_PATH=<absolute-path>` or as the platform ONNX Runtime shared library beside the sidecar executable.
+- `--execution-provider` is optional. Accepted values are `cpu` (default) and `directml`. The flag may appear at most once.
 - Unknown, duplicate, or incomplete startup arguments fail startup before `ready`.
+
+### Execution Providers
+
+The sidecar selects an ONNX Runtime execution provider exactly once at startup via `--execution-provider`:
+
+- `cpu` (default): the release floor. Used when the flag is absent.
+- `directml`: Windows-only opt-in. On any non-Windows target, the flag is rejected before `ready` with `Startup error: --execution-provider directml is supported only on Windows`.
+
+DirectML uses the DirectML EP already compiled into the bundled `onnxruntime.dll`; the release zip gains no additional files.
+
+CUDA is not supported and will not be added. See `AGENTS.md §10.2`.
+
+DirectML output is not guaranteed to match CPU output bit-exactly. Floating-point rounding differs between CPU and GPU kernels. Do not hash PCM to compare outputs across execution providers.
+
+If DirectML registration fails (missing DirectML runtime, driver too old, no compatible adapter), the error surfaces on the first synthesis request through the normal `error` response envelope. The sidecar never silently falls back to CPU.
 
 If startup validation fails:
 
@@ -213,6 +230,18 @@ Stable error prefixes:
 - synthesis/runtime failures: `Synthesis failed:`
 
 The response shape, stream, and leading error category are the stable contract. The full tail text may vary by platform or by the underlying OS/library error.
+
+### Observability
+
+The sidecar writes structured log lines to `stderr` in the form `level=<L> event=<name> key=value ...`. Every successful synth request emits three `INFO`-level timing events:
+
+| Event | Fields | Notes |
+|-------|--------|-------|
+| `phonemization_done` | `voice`, `duration_ms` | Time spent in eSpeak phonemization. |
+| `model_loaded` | `duration_ms` | Emitted **only on cache miss** (first request for a given `model_dir`). |
+| `inference_done` | `voice`, `chunk_count`, `duration_ms` | Total ONNX inference time across all phoneme chunks. |
+
+Hosts can triage request latency by reading these `duration_ms` values without attaching a profiler. `stdout` is reserved for the JSON protocol and PCM bytes.
 
 ## Supported Voice Families
 
@@ -326,13 +355,17 @@ The helper validates the paths before invoking the ignored suite serially with `
 
 ## GitHub CI Asset Configuration
 
-The repository-owned Windows CI and release workflows expect real asset URLs to be provided from GitHub configuration rather than committed into the repo.
+The Windows CI and release workflows read upstream asset URLs (and pinned SHA-256 checksums) from the committed `release-sources.toml` at the repo root. No repository secrets are required; forks can reproduce the release on a clean runner.
 
-Required GitHub configuration:
+`release-sources.toml` exposes three tables — `[kokoro_model]`, `[onnxruntime]`, `[piper_windows]` — each with `url` and `sha256` fields. Leave `[piper_windows]` empty to derive the URL from the current tag.
 
-- secret `KOKORO_TTS_RELEASE_KOKORO_MODEL_URL`
-- secret `KOKORO_TTS_RELEASE_ONNXRUNTIME_URL`
-- optional repository variable `KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL`
+Local overrides for staging against custom URLs:
+
+- `KOKORO_TTS_RELEASE_KOKORO_MODEL_URL`
+- `KOKORO_TTS_RELEASE_ONNXRUNTIME_URL`
+- `KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL`
+
+Env overrides bypass `release-sources.toml` entirely; checksum verification is skipped for overridden URLs.
 
 Optional GitHub configuration:
 
@@ -411,6 +444,18 @@ Packaging scaffolds for future explicit-input local assembly:
 ```
 
 Those scripts only assemble archives from explicit inputs. They do not mean Linux or macOS are currently supported release targets by this repository.
+
+## Latency
+
+Warm-inference p-quantiles for the v0.1.0 release, captured by the `windows-bench` CI job against the frozen baseline at [benches/baseline.json](benches/baseline.json). Regressions of `Δp95 > +10 %` vs. the frozen baseline fail the bench gate on PRs and the `bench-gate` job on release tags.
+
+| Version | Voice | 1s p50 / p95 / p99 (ms) | 5s p50 / p95 / p99 (ms) | 20s p50 / p95 / p99 (ms) |
+| --- | --- | --- | --- | --- |
+| v0.1.0 (pending first capture) | af_heart | — / — / — | — / — / — | — / — / — |
+| v0.1.0 (pending first capture) | pf_dora | — / — / — | — / — / — | — / — / — |
+| v0.1.0 (pending first capture) | ef_alice | — / — / — | — / — / — | — / — / — |
+
+Runner hardware class: github-hosted `windows-latest` (Azure Standard_D4ads_v5, 4 vCPU AMD EPYC 7763, 16 GiB RAM). Measurements are warm-inference p-quantiles over N=50 per cell; cold-start variance is intentionally excluded. The `v0.1.0` row is populated from a first green `windows-bench` run on `main` via [scripts/Update-BenchBaseline.ps1](scripts/Update-BenchBaseline.ps1), which requires PR-checklist + CODEOWNERS review to rotate.
 
 ## Upstream References
 

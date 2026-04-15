@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use protocol::{TtsRequest, TtsResponse};
+use synthesis::ExecutionProvider;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::fmt::format::Writer as FormatWriter;
@@ -24,6 +25,7 @@ const LEGACY_LOG_ENV: &str = "LINGOPILOT_TTS_LOG";
 #[derive(Debug, PartialEq, Eq)]
 struct StartupConfig {
     espeak_data_dir: PathBuf,
+    execution_provider: ExecutionProvider,
 }
 
 struct ObservabilityFormatter;
@@ -131,6 +133,14 @@ fn main() -> ExitCode {
         espeak_data_dir = startup.espeak_data_dir.display().to_string()
     );
 
+    tracing::info!(
+        event = "execution_provider_selected",
+        provider = match startup.execution_provider {
+            ExecutionProvider::Cpu => "cpu",
+            ExecutionProvider::DirectMl => "directml",
+        }
+    );
+
     if !send_response(
         &TtsResponse::Ready {
             version: VERSION.to_string(),
@@ -140,7 +150,10 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let mut synthesis_cache = synthesis::SynthesisCache::new(startup.espeak_data_dir.clone());
+    let mut synthesis_cache = synthesis::SynthesisCache::new(
+        startup.espeak_data_dir.clone(),
+        startup.execution_provider,
+    );
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let line = match line {
@@ -340,6 +353,7 @@ where
     let _binary = args.next();
 
     let mut espeak_data_dir: Option<PathBuf> = None;
+    let mut execution_provider: Option<ExecutionProvider> = None;
 
     while let Some(arg) = args.next() {
         if arg == OsStr::new("--espeak-data-dir") {
@@ -355,6 +369,42 @@ where
             continue;
         }
 
+        if arg == OsStr::new("--execution-provider") {
+            if execution_provider.is_some() {
+                return Err("Duplicate startup argument: --execution-provider".to_string());
+            }
+
+            let Some(value) = args.next() else {
+                return Err("Missing value for --execution-provider".to_string());
+            };
+
+            let value_str = value.to_string_lossy().to_string();
+            let ep = match value_str.as_str() {
+                "cpu" => ExecutionProvider::Cpu,
+                "directml" => {
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        return Err(
+                            "--execution-provider directml is supported only on Windows"
+                                .to_string(),
+                        );
+                    }
+                    #[cfg(target_os = "windows")]
+                    {
+                        ExecutionProvider::DirectMl
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "Invalid value for --execution-provider: '{}' (expected 'cpu' or 'directml')",
+                        other
+                    ));
+                }
+            };
+            execution_provider = Some(ep);
+            continue;
+        }
+
         return Err(format!(
             "Unknown startup argument: {}",
             arg.to_string_lossy()
@@ -365,7 +415,10 @@ where
         return Err("Missing required startup argument: --espeak-data-dir <path>".to_string());
     };
 
-    Ok(StartupConfig { espeak_data_dir })
+    Ok(StartupConfig {
+        espeak_data_dir,
+        execution_provider: execution_provider.unwrap_or(ExecutionProvider::Cpu),
+    })
 }
 
 fn send_response(response: &TtsResponse, response_type: &'static str) -> bool {
@@ -395,7 +448,7 @@ fn send_response(response: &TtsResponse, response_type: &'static str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_request, parse_startup_config, StartupConfig};
+    use super::{parse_request, parse_startup_config, ExecutionProvider, StartupConfig};
     use std::path::PathBuf;
 
     #[test]
@@ -419,8 +472,106 @@ mod tests {
             config,
             StartupConfig {
                 espeak_data_dir: PathBuf::from("C:\\runtime\\espeak-runtime"),
+                execution_provider: ExecutionProvider::Cpu,
             }
         );
+    }
+
+    #[test]
+    fn startup_config_defaults_execution_provider_to_cpu() {
+        let config = parse_startup_config([
+            "lingopilot-tts-kokoro",
+            "--espeak-data-dir",
+            "C:\\runtime\\espeak-runtime",
+        ])
+        .expect("startup config should parse");
+        assert_eq!(config.execution_provider, ExecutionProvider::Cpu);
+    }
+
+    #[test]
+    fn startup_config_accepts_cpu_execution_provider() {
+        let config = parse_startup_config([
+            "lingopilot-tts-kokoro",
+            "--espeak-data-dir",
+            "C:\\runtime\\espeak-runtime",
+            "--execution-provider",
+            "cpu",
+        ])
+        .expect("startup config should parse");
+        assert_eq!(config.execution_provider, ExecutionProvider::Cpu);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn startup_config_accepts_directml_execution_provider() {
+        let config = parse_startup_config([
+            "lingopilot-tts-kokoro",
+            "--espeak-data-dir",
+            "C:\\runtime\\espeak-runtime",
+            "--execution-provider",
+            "directml",
+        ])
+        .expect("startup config should parse");
+        assert_eq!(config.execution_provider, ExecutionProvider::DirectMl);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn startup_config_rejects_directml_on_non_windows() {
+        let error = parse_startup_config([
+            "lingopilot-tts-kokoro",
+            "--espeak-data-dir",
+            "/runtime/espeak-runtime",
+            "--execution-provider",
+            "directml",
+        ])
+        .expect_err("directml should be rejected on non-Windows");
+        assert!(error.contains("Windows"));
+    }
+
+    #[test]
+    fn startup_config_rejects_unknown_execution_provider_value() {
+        for bad in ["cuda", "dml", "gpu", ""] {
+            let error = parse_startup_config([
+                "lingopilot-tts-kokoro",
+                "--espeak-data-dir",
+                "C:\\runtime\\espeak-runtime",
+                "--execution-provider",
+                bad,
+            ])
+            .expect_err("unknown value should be rejected");
+            assert!(
+                error.starts_with("Invalid value for --execution-provider:"),
+                "unexpected error for '{bad}': {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_config_rejects_duplicate_execution_provider_flag() {
+        let error = parse_startup_config([
+            "lingopilot-tts-kokoro",
+            "--espeak-data-dir",
+            "C:\\runtime\\espeak-runtime",
+            "--execution-provider",
+            "cpu",
+            "--execution-provider",
+            "cpu",
+        ])
+        .expect_err("duplicate flag should be rejected");
+        assert_eq!(error, "Duplicate startup argument: --execution-provider");
+    }
+
+    #[test]
+    fn startup_config_rejects_missing_execution_provider_value() {
+        let error = parse_startup_config([
+            "lingopilot-tts-kokoro",
+            "--espeak-data-dir",
+            "C:\\runtime\\espeak-runtime",
+            "--execution-provider",
+        ])
+        .expect_err("missing value should be rejected");
+        assert_eq!(error, "Missing value for --execution-provider");
     }
 
     #[test]

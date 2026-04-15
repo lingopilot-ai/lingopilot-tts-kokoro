@@ -11,18 +11,25 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$EspeakRuntimeDir,
     [string]$Version,
-    [string]$OutputDir = (Join-Path (Join-Path $PSScriptRoot "..") "dist")
+    [string]$OutputDir = (Join-Path (Join-Path $PSScriptRoot "..") "dist"),
+    [switch]$StageOnly
 )
 
 $ErrorActionPreference = "Stop"
 
-& (Join-Path $PSScriptRoot "Package-PosixRelease.ps1") `
-    -Platform "linux" `
-    -Architecture $Architecture `
-    -BinaryPath $BinaryPath `
-    -ModelDir $ModelDir `
-    -OnnxRuntimeLibrary $OnnxRuntimeLibrary `
-    -EspeakRuntimeDir $EspeakRuntimeDir `
-    -Version $Version `
-    -OutputDir $OutputDir
+$forwardedArgs = @{
+    Platform           = "linux"
+    Architecture       = $Architecture
+    BinaryPath         = $BinaryPath
+    ModelDir           = $ModelDir
+    OnnxRuntimeLibrary = $OnnxRuntimeLibrary
+    EspeakRuntimeDir   = $EspeakRuntimeDir
+    Version            = $Version
+    OutputDir          = $OutputDir
+}
+if ($PSBoundParameters.ContainsKey('StageOnly') -and $StageOnly) {
+    $forwardedArgs['StageOnly'] = $true
+}
+
+& (Join-Path $PSScriptRoot "Package-PosixRelease.ps1") @forwardedArgs
 

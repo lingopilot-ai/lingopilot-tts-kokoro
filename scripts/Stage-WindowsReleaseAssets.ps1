@@ -7,6 +7,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "ReleasePackaging.Common.ps1")
+
 function Get-PackageVersion {
     param([string]$CargoTomlPath)
 
@@ -128,28 +130,55 @@ if ($normalizedVersion.StartsWith("v")) {
 }
 
 $versionTag = "v$normalizedVersion"
-if (
-    [string]::IsNullOrWhiteSpace($PiperWindowsReleaseZipUrl) -and
-    [string]::IsNullOrWhiteSpace($env:LINGOPILOT_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL)
-) {
-    $PiperWindowsReleaseZipUrl = "https://github.com/lingopilot-ai/lingopilot-tts-piper/releases/download/$versionTag/lingopilot-tts-piper-$versionTag-windows-x86_64.zip"
+
+$releaseSources = Get-ReleaseSourcesConfig -RepoRoot $repoRoot
+
+$kokoroResolution = Resolve-ReleaseAssetUrl `
+    -Name "KOKORO_TTS_RELEASE_KOKORO_MODEL_URL" `
+    -EnvOverride $KokoroModelUrl `
+    -LegacyOverride $env:LINGOPILOT_TTS_RELEASE_KOKORO_MODEL_URL `
+    -ConfigValue $releaseSources.kokoro_model.url
+$onnxResolution = Resolve-ReleaseAssetUrl `
+    -Name "KOKORO_TTS_RELEASE_ONNXRUNTIME_URL" `
+    -EnvOverride $OnnxRuntimeUrl `
+    -LegacyOverride $env:LINGOPILOT_TTS_RELEASE_ONNXRUNTIME_URL `
+    -ConfigValue $releaseSources.onnxruntime.url
+$piperResolution = Resolve-ReleaseAssetUrl `
+    -Name "KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL" `
+    -EnvOverride $PiperWindowsReleaseZipUrl `
+    -LegacyOverride $env:LINGOPILOT_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL `
+    -ConfigValue $releaseSources.piper_windows.url
+
+if ([string]::IsNullOrWhiteSpace($piperResolution.Value)) {
+    $piperResolution = [pscustomobject]@{
+        Value  = "https://github.com/lingopilot-ai/lingopilot-tts-piper/releases/download/$versionTag/lingopilot-tts-piper-$versionTag-windows-x86_64.zip"
+        Source = 'derived'
+    }
 }
 
-$resolvedKokoroModelUrl = Resolve-AliasedValue `
-    -PrimaryName "KOKORO_TTS_RELEASE_KOKORO_MODEL_URL" `
-    -PrimaryValue $KokoroModelUrl `
-    -LegacyName "LINGOPILOT_TTS_RELEASE_KOKORO_MODEL_URL" `
-    -LegacyValue $env:LINGOPILOT_TTS_RELEASE_KOKORO_MODEL_URL
-$resolvedOnnxRuntimeUrl = Resolve-AliasedValue `
-    -PrimaryName "KOKORO_TTS_RELEASE_ONNXRUNTIME_URL" `
-    -PrimaryValue $OnnxRuntimeUrl `
-    -LegacyName "LINGOPILOT_TTS_RELEASE_ONNXRUNTIME_URL" `
-    -LegacyValue $env:LINGOPILOT_TTS_RELEASE_ONNXRUNTIME_URL
-$resolvedPiperZipUrl = Resolve-AliasedValue `
-    -PrimaryName "KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL" `
-    -PrimaryValue $PiperWindowsReleaseZipUrl `
-    -LegacyName "LINGOPILOT_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL" `
-    -LegacyValue $env:LINGOPILOT_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL
+foreach ($r in @(
+    @{ Name = 'KOKORO_TTS_RELEASE_KOKORO_MODEL_URL'; Resolution = $kokoroResolution },
+    @{ Name = 'KOKORO_TTS_RELEASE_ONNXRUNTIME_URL';  Resolution = $onnxResolution },
+    @{ Name = 'KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL'; Resolution = $piperResolution }
+)) {
+    if ([string]::IsNullOrWhiteSpace($r.Resolution.Value)) {
+        throw "$($r.Name) must be configured (via release-sources.toml or env override)."
+    }
+}
+
+$resolvedKokoroModelUrl = $kokoroResolution.Value
+$resolvedOnnxRuntimeUrl = $onnxResolution.Value
+$resolvedPiperZipUrl = $piperResolution.Value
+
+function Get-PinnedSha256 {
+    param($Resolution, $ConfigSha256)
+    if ($Resolution.Source -eq 'toml') { return $ConfigSha256 }
+    return $null
+}
+
+$kokoroSha256 = Get-PinnedSha256 -Resolution $kokoroResolution -ConfigSha256 $releaseSources.kokoro_model.sha256
+$onnxSha256   = Get-PinnedSha256 -Resolution $onnxResolution   -ConfigSha256 $releaseSources.onnxruntime.sha256
+$piperSha256  = Get-PinnedSha256 -Resolution $piperResolution  -ConfigSha256 $releaseSources.piper_windows.sha256
 
 $downloadRoot = Join-Path $repoRoot "target\release-staging-downloads"
 $extractRoot = Join-Path $repoRoot "target\release-staging-extract"
@@ -169,9 +198,19 @@ $piperZipPath = Join-Path $downloadRoot "piper-release.zip"
 $kokoroArchivePath = Join-Path $downloadRoot "kokoro-model.zip"
 $onnxRuntimeDownloadPath = Join-Path $downloadRoot ([System.IO.Path]::GetFileName(([System.Uri]$resolvedOnnxRuntimeUrl).AbsolutePath))
 
+function Write-AssetProvenance {
+    param($Name, $Resolution, $Path, $ExpectedSha256)
+    $actual = Assert-FileSha256 -Path $Path -Expected $ExpectedSha256
+    $shaLabel = if ($actual) { $actual } else { 'skipped' }
+    Write-Host ("[release-asset] {0} source={1} sha256={2}" -f $Name, $Resolution.Source, $shaLabel)
+}
+
 Invoke-Download -Url $resolvedPiperZipUrl -DestinationPath $piperZipPath
+Write-AssetProvenance -Name 'piper_windows' -Resolution $piperResolution -Path $piperZipPath -ExpectedSha256 $piperSha256
 Invoke-Download -Url $resolvedKokoroModelUrl -DestinationPath $kokoroArchivePath
+Write-AssetProvenance -Name 'kokoro_model' -Resolution $kokoroResolution -Path $kokoroArchivePath -ExpectedSha256 $kokoroSha256
 Invoke-Download -Url $resolvedOnnxRuntimeUrl -DestinationPath $onnxRuntimeDownloadPath
+Write-AssetProvenance -Name 'onnxruntime' -Resolution $onnxResolution -Path $onnxRuntimeDownloadPath -ExpectedSha256 $onnxSha256
 
 $piperExtractDir = Join-Path $extractRoot "piper"
 Expand-ArchiveToDirectory -ArchivePath $piperZipPath -DestinationPath $piperExtractDir

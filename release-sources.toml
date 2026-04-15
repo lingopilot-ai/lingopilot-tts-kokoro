@@ -1,0 +1,34 @@
+# Public upstream URLs + SHA-256 checksums for Windows release assets.
+# This file is the canonical source of truth for the release workflow — no
+# repository secrets are required. Override any entry locally by exporting the
+# matching KOKORO_TTS_RELEASE_*_URL environment variable; env overrides bypass
+# this file entirely.
+#
+# SHA-256 fields are optional when the URL is overridden via env vars or
+# derived at runtime (piper_windows). When a URL is loaded from this file and
+# its sha256 is empty, staging emits a warning and skips verification.
+
+[kokoro_model]
+url = "https://github.com/lingopilot-ai/lingopilot-tts-kokoro-assets/releases/download/v0.1.0/kokoro-model-v0.1.0.zip"
+sha256 = ""
+
+[onnxruntime]
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-win-x64-1.20.1.zip"
+sha256 = ""
+
+[onnxruntime_linux_x64]
+# Consumed by scripts/Stage-PosixReleaseAssets.ps1 on ubuntu-latest runners (E-02).
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz"
+sha256 = ""
+
+[onnxruntime_macos_arm64]
+# Consumed by scripts/Stage-PosixReleaseAssets.ps1 on macos-latest runners (E-02).
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-osx-arm64-1.20.1.tgz"
+sha256 = ""
+
+[piper_windows]
+# Leave url empty to derive from the current tag:
+#   https://github.com/lingopilot-ai/lingopilot-tts-piper/releases/download/vX.Y.Z/lingopilot-tts-piper-vX.Y.Z-windows-x86_64.zip
+# Override with KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL when needed.
+url = ""
+sha256 = ""

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 #[allow(dead_code)]
-pub(crate) const LIVE_TEST_IGNORE_REASON: &str =
+pub const LIVE_TEST_IGNORE_REASON: &str =
     "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets";
 const PRIMARY_LIVE_ESPEAK_RUNTIME_ENV: &str = "KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR";
 const LEGACY_LIVE_ESPEAK_RUNTIME_ENV: &str = "LINGOPILOT_TTS_LIVE_ESPEAK_RUNTIME_DIR";
@@ -10,14 +10,14 @@ const LEGACY_LIVE_MODEL_ENV: &str = "LINGOPILOT_TTS_LIVE_MODEL_DIR";
 const PRIMARY_LIVE_ONNXRUNTIME_ENV: &str = "KOKORO_TTS_LIVE_ONNXRUNTIME_DLL";
 const LEGACY_LIVE_ONNXRUNTIME_ENV: &str = "LINGOPILOT_TTS_LIVE_ONNXRUNTIME_DLL";
 
-pub(crate) struct LiveTestAssets {
-    pub(crate) espeak_runtime_dir: PathBuf,
-    pub(crate) model_dir: PathBuf,
-    pub(crate) onnxruntime_dll: PathBuf,
+pub struct LiveTestAssets {
+    pub espeak_runtime_dir: PathBuf,
+    pub model_dir: PathBuf,
+    pub onnxruntime_dll: PathBuf,
 }
 
 impl LiveTestAssets {
-    pub(crate) fn from_env() -> Self {
+    pub fn from_env() -> Self {
         let espeak_runtime_dir = require_absolute_dir_env(
             PRIMARY_LIVE_ESPEAK_RUNTIME_ENV,
             Some(LEGACY_LIVE_ESPEAK_RUNTIME_ENV),
@@ -38,8 +38,18 @@ impl LiveTestAssets {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn install_onnxruntime_env(&self) {
+    pub fn install_onnxruntime_env(&self) {
         std::env::set_var("ORT_DYLIB_PATH", &self.onnxruntime_dll);
+    }
+
+    #[allow(dead_code)]
+    pub fn is_configured() -> bool {
+        let has = |primary: &str, legacy: &str| {
+            std::env::var(primary).is_ok() || std::env::var(legacy).is_ok()
+        };
+        has(PRIMARY_LIVE_ESPEAK_RUNTIME_ENV, LEGACY_LIVE_ESPEAK_RUNTIME_ENV)
+            && has(PRIMARY_LIVE_MODEL_ENV, LEGACY_LIVE_MODEL_ENV)
+            && has(PRIMARY_LIVE_ONNXRUNTIME_ENV, LEGACY_LIVE_ONNXRUNTIME_ENV)
     }
 }
 
