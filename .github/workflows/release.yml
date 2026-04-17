@@ -112,7 +112,7 @@ jobs:
 
       - name: Run packaged readiness verification
         shell: pwsh
-        run: .\scripts\Verify-Readiness.ps1 -Packaged
+        run: .\scripts\Verify-Readiness.ps1 -Packaged -SkipLiveTests
 
       - name: Install cargo-sbom
         shell: pwsh

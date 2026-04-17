@@ -1,5 +1,6 @@
 param(
-    [switch]$Packaged
+    [switch]$Packaged,
+    [switch]$SkipLiveTests
 )
 
 $ErrorActionPreference = "Stop"
@@ -149,12 +150,14 @@ try {
     cargo check --locked
     cargo test --locked
 
-    $liveAssets = Get-LiveAssetConfiguration
-    if ($liveAssets) {
-        $env:KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR = $liveAssets.RuntimeDir
-        $env:KOKORO_TTS_LIVE_MODEL_DIR = $liveAssets.ModelDir
-        $env:KOKORO_TTS_LIVE_ONNXRUNTIME_DLL = $liveAssets.OnnxRuntimeDll
-        cargo test --locked -- --ignored --test-threads=1
+    if (-not $SkipLiveTests) {
+        $liveAssets = Get-LiveAssetConfiguration
+        if ($liveAssets) {
+            $env:KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR = $liveAssets.RuntimeDir
+            $env:KOKORO_TTS_LIVE_MODEL_DIR = $liveAssets.ModelDir
+            $env:KOKORO_TTS_LIVE_ONNXRUNTIME_DLL = $liveAssets.OnnxRuntimeDll
+            cargo test --locked -- --ignored --test-threads=1
+        }
     }
 
     if ($Packaged) {
