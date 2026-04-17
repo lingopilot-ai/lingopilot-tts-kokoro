@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use libloading::Library;
+use sha2::{Sha256, Digest};
 use ndarray::{Array2, Array3, ArrayD, Axis, Ix2, Ix3};
 use ndarray_npy::NpzReader;
 use ort::session::Session;
@@ -105,12 +106,17 @@ pub struct SynthesisCache {
     phonemizer: Box<dyn Phonemizer>,
     runtime_factory: Box<dyn RuntimeFactory>,
     runtimes: HashMap<RuntimeKey, Box<dyn KokoroRuntime>>,
+    g2p_asset_cache: HashMap<PathBuf, G2pAssetStatus>,
 }
 
 impl SynthesisCache {
     pub fn new(espeak_data_dir: PathBuf, execution_provider: ExecutionProvider) -> Self {
+        let composite = CompositePhonemizer {
+            espeak: Box::new(EspeakPhonemizer::new(espeak_data_dir)),
+            onnx_g2p: OnnxG2PPhonemizer { ja: None, zh: None },
+        };
         Self::with_components(
-            Box::new(EspeakPhonemizer::new(espeak_data_dir)),
+            Box::new(composite),
             Box::new(OrtRuntimeFactory { execution_provider }),
         )
     }
@@ -123,6 +129,7 @@ impl SynthesisCache {
             phonemizer,
             runtime_factory,
             runtimes: HashMap::new(),
+            g2p_asset_cache: HashMap::new(),
         }
     }
 
@@ -132,6 +139,35 @@ impl SynthesisCache {
         assets: &ResolvedModelAssets,
         speed: f32,
     ) -> Result<SynthResult, String> {
+        if matches!(assets.voice.lang_code, "j" | "z") {
+            if let Some(model_dir) = assets.model_path.parent() {
+                self.g2p_asset_cache
+                    .entry(model_dir.to_path_buf())
+                    .or_insert_with(|| {
+                        let status = load_and_verify_g2p_assets(model_dir);
+                        match &status {
+                            G2pAssetStatus::Skipped => tracing::info!(
+                                event = "g2p_verification_skipped",
+                                model_dir = %model_dir.display()
+                            ),
+                            G2pAssetStatus::Verified(_) => tracing::info!(
+                                event = "g2p_verification_succeeded",
+                                model_dir = %model_dir.display()
+                            ),
+                            G2pAssetStatus::Failed { error } => tracing::warn!(
+                                event = "g2p_verification_failed",
+                                model_dir = %model_dir.display(),
+                                error = %error
+                            ),
+                        }
+                        status
+                    });
+                // TODO(scope-2): when Verified, inject OnnxG2PSession into
+                // CompositePhonemizer via trait method or downcast so the
+                // ONNX leg can run inference instead of returning the stub error.
+            }
+        }
+
         let phonemize_start = Instant::now();
         let phonemes = self.phonemizer.phonemize(text, &assets.voice)?;
         let phonemize_elapsed = phonemize_start.elapsed();
@@ -926,6 +962,184 @@ where
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VerifiedG2pAsset {
+    pub(crate) path: PathBuf,
+    pub(crate) sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum G2pAssetStatus {
+    Skipped,
+    Verified(HashMap<String, VerifiedG2pAsset>),
+    Failed { error: String },
+}
+
+fn parse_g2p_manifest(path: &Path) -> Result<HashMap<String, String>, String> {
+    let content = fs::read_to_string(path).map_err(|e| {
+        format!("cannot read G2P manifest '{}': {}", path.display(), e)
+    })?;
+    let map: HashMap<String, String> = serde_json::from_str(&content).map_err(|e| {
+        format!("cannot parse G2P manifest '{}': {}", path.display(), e)
+    })?;
+    for (file, hash) in &map {
+        if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!(
+                "invalid SHA-256 hash for '{}' in '{}': {}",
+                file,
+                path.display(),
+                hash
+            ));
+        }
+    }
+    Ok(map)
+}
+
+fn compute_sha256(path: &Path) -> Result<String, String> {
+    let mut file = File::open(path).map_err(|e| {
+        format!("cannot open '{}': {}", path.display(), e)
+    })?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(|e| {
+        format!("cannot read '{}': {}", path.display(), e)
+    })?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn load_and_verify_g2p_assets(model_dir: &Path) -> G2pAssetStatus {
+    let manifest_path = model_dir.join("g2p-manifest.json");
+    let manifest_exists = manifest_path.is_file();
+
+    // Collect g2p-*.onnx files present in the directory
+    let g2p_onnx_files: Vec<PathBuf> = match fs::read_dir(model_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                    name.starts_with("g2p-") && name.ends_with(".onnx")
+                } else {
+                    false
+                }
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+
+    if !manifest_exists && g2p_onnx_files.is_empty() {
+        return G2pAssetStatus::Skipped;
+    }
+
+    if !manifest_exists {
+        // .onnx files present without a manifest
+        let name = g2p_onnx_files[0]
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        return G2pAssetStatus::Failed {
+            error: format!("unmanifested G2P asset: {}", name),
+        };
+    }
+
+    let manifest = match parse_g2p_manifest(&manifest_path) {
+        Ok(m) => m,
+        Err(e) => return G2pAssetStatus::Failed { error: e },
+    };
+
+    let mut verified = HashMap::new();
+
+    for (file_name, expected_hash) in &manifest {
+        let asset_path = model_dir.join(file_name);
+        if !asset_path.is_file() {
+            return G2pAssetStatus::Failed {
+                error: format!("missing G2P asset: {}", file_name),
+            };
+        }
+        let actual_hash = match compute_sha256(&asset_path) {
+            Ok(h) => h,
+            Err(e) => return G2pAssetStatus::Failed { error: e },
+        };
+        if actual_hash != *expected_hash {
+            return G2pAssetStatus::Failed {
+                error: format!(
+                    "g2p model hash mismatch: {} (expected {}, got {})",
+                    file_name, expected_hash, actual_hash
+                ),
+            };
+        }
+        verified.insert(
+            file_name.clone(),
+            VerifiedG2pAsset {
+                path: asset_path,
+                sha256: actual_hash,
+            },
+        );
+    }
+
+    // Check for .onnx files not listed in the manifest
+    for onnx_path in &g2p_onnx_files {
+        let name = onnx_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if !manifest.contains_key(&name) {
+            return G2pAssetStatus::Failed {
+                error: format!("unmanifested G2P asset: {}", name),
+            };
+        }
+    }
+
+    G2pAssetStatus::Verified(verified)
+}
+
+struct OnnxG2PSession {
+    path: PathBuf,
+    verified_sha256: String,
+}
+
+struct OnnxG2PPhonemizer {
+    ja: Option<OnnxG2PSession>,
+    zh: Option<OnnxG2PSession>,
+}
+
+impl Phonemizer for OnnxG2PPhonemizer {
+    fn phonemize(&mut self, _text: &str, voice: &ResolvedVoice) -> Result<PhonemeResult, String> {
+        let session = match voice.lang_code {
+            "j" => &self.ja,
+            "z" => &self.zh,
+            other => return Err(format!(
+                "OnnxG2PPhonemizer does not handle lang_code='{}'", other
+            )),
+        };
+        match session {
+            None => Err(format!(
+                "phonemization is not implemented yet for lang_code='{}'",
+                voice.lang_code
+            )),
+            Some(_) => Err(format!(
+                "{} G2P ONNX phonemization not yet implemented \
+                 — asset present but inference path is stub",
+                if voice.lang_code == "j" { "Japanese" } else { "Mandarin" }
+            )),
+        }
+    }
+}
+
+struct CompositePhonemizer {
+    espeak: Box<dyn Phonemizer>,
+    onnx_g2p: OnnxG2PPhonemizer,
+}
+
+impl Phonemizer for CompositePhonemizer {
+    fn phonemize(&mut self, text: &str, voice: &ResolvedVoice) -> Result<PhonemeResult, String> {
+        match voice.lang_code {
+            "j" | "z" => self.onnx_g2p.phonemize(text, voice),
+            _ => self.espeak.phonemize(text, voice),
+        }
+    }
+}
+
 fn load_voice_styles(voices_path: &Path) -> Result<HashMap<String, Array2<f32>>, String> {
     let file = File::open(voices_path).map_err(|error| {
         format!(
@@ -1380,16 +1594,34 @@ fn platform_espeak_library_name() -> &'static str {
     }
 }
 
+/// Test-only helper: phonemizes text using only the eSpeak pipeline (no ONNX G2P).
+///
+/// Exposed publicly so integration tests can call it via
+/// `lingopilot_tts_kokoro::synthesis::phonemize_for_test`.
+/// Not intended for production use.
+#[doc(hidden)]
+pub fn phonemize_for_test(
+    text: &str,
+    voice_id: &str,
+    espeak_runtime_dir: &Path,
+) -> Result<PhonemeResult, String> {
+    let voice = resolve_voice_profile(voice_id)?;
+    let mut espeak = EspeakPhonemizer::new(espeak_runtime_dir.to_path_buf());
+    espeak.phonemize(text, &voice)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        filter_phonemes_to_vocab, float_audio_to_pcm16, load_voice_styles,
-        normalize_english_phonemes, platform_espeak_library_name,
-        platform_onnxruntime_library_name, resolve_espeak_library_path, resolve_model_assets,
-        resolve_onnxruntime_library_path_for, split_phonemes_for_inference, tokenize_phonemes,
-        validate_espeak_data_dir, validate_model_dir, KokoroRuntime, PhonemeResult,
-        ExecutionProvider, ResolvedModelAssets, ResolvedVoice, RuntimeFactory, RuntimeKey,
-        SynthesisCache, ORT_DYLIB_PATH_ENV,
+        compute_sha256, filter_phonemes_to_vocab, float_audio_to_pcm16,
+        load_and_verify_g2p_assets, load_voice_styles, normalize_english_phonemes,
+        parse_g2p_manifest, platform_espeak_library_name, platform_onnxruntime_library_name,
+        resolve_espeak_library_path, resolve_model_assets, resolve_onnxruntime_library_path_for,
+        split_phonemes_for_inference, tokenize_phonemes, validate_espeak_data_dir,
+        validate_model_dir, ExecutionProvider, G2pAssetStatus, KokoroRuntime, PhonemeResult,
+        ResolvedModelAssets, ResolvedVoice, RuntimeFactory, RuntimeKey, SynthesisCache,
+        VerifiedG2pAsset, ORT_DYLIB_PATH_ENV, CompositePhonemizer, OnnxG2PPhonemizer,
+        OnnxG2PSession, Phonemizer,
     };
     use crate::kokoro_vocab;
     use crate::live_test_support::LiveTestAssets;
@@ -1973,6 +2205,159 @@ mod tests {
         assert_eq!(synth_calls.lock().expect("calls should lock").len(), 2);
     }
 
+    fn sha256_hex(data: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(data))
+    }
+
+    #[test]
+    fn manifest_and_files_both_absent_yields_skipped() {
+        let dir = TempDir::new("g2p-absent");
+        let status = load_and_verify_g2p_assets(dir.path());
+        assert_eq!(status, G2pAssetStatus::Skipped);
+    }
+
+    #[test]
+    fn file_present_without_manifest_entry_yields_failed_unmanifested() {
+        let dir = TempDir::new("g2p-unmanifested");
+        fs::write(dir.path().join("g2p-ja.onnx"), b"fake model").expect("write");
+        let status = load_and_verify_g2p_assets(dir.path());
+        match status {
+            G2pAssetStatus::Failed { error } => {
+                assert!(
+                    error.contains("unmanifested G2P asset"),
+                    "unexpected error: {}",
+                    error
+                );
+            }
+            other => panic!("expected Failed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn manifest_entry_without_file_yields_failed_missing() {
+        let dir = TempDir::new("g2p-missing");
+        let manifest = serde_json::json!({
+            "g2p-ja.onnx": "a".repeat(64)
+        });
+        fs::write(
+            dir.path().join("g2p-manifest.json"),
+            manifest.to_string(),
+        )
+        .expect("write manifest");
+        let status = load_and_verify_g2p_assets(dir.path());
+        match status {
+            G2pAssetStatus::Failed { error } => {
+                assert!(
+                    error.contains("missing G2P asset"),
+                    "unexpected error: {}",
+                    error
+                );
+            }
+            other => panic!("expected Failed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn hash_mismatch_yields_failed_with_prefix() {
+        let dir = TempDir::new("g2p-mismatch");
+        let data = b"model data";
+        fs::write(dir.path().join("g2p-ja.onnx"), data).expect("write onnx");
+        let manifest = serde_json::json!({
+            "g2p-ja.onnx": "b".repeat(64)
+        });
+        fs::write(
+            dir.path().join("g2p-manifest.json"),
+            manifest.to_string(),
+        )
+        .expect("write manifest");
+        let status = load_and_verify_g2p_assets(dir.path());
+        match status {
+            G2pAssetStatus::Failed { error } => {
+                assert!(
+                    error.contains("g2p model hash mismatch"),
+                    "unexpected error: {}",
+                    error
+                );
+            }
+            other => panic!("expected Failed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn hash_match_for_ja_only_yields_verified_with_one_entry() {
+        let dir = TempDir::new("g2p-ja-only");
+        let data = b"ja model content";
+        let hash = sha256_hex(data);
+        fs::write(dir.path().join("g2p-ja.onnx"), data).expect("write onnx");
+        let manifest = serde_json::json!({ "g2p-ja.onnx": hash });
+        fs::write(
+            dir.path().join("g2p-manifest.json"),
+            manifest.to_string(),
+        )
+        .expect("write manifest");
+        let status = load_and_verify_g2p_assets(dir.path());
+        match &status {
+            G2pAssetStatus::Verified(map) => {
+                assert_eq!(map.len(), 1);
+                let asset = &map["g2p-ja.onnx"];
+                assert_eq!(asset.sha256, hash);
+                assert_eq!(asset.path, dir.path().join("g2p-ja.onnx"));
+            }
+            other => panic!("expected Verified, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn hash_match_for_both_languages_yields_verified_with_two_entries() {
+        let dir = TempDir::new("g2p-both-langs");
+        let ja_data = b"ja model";
+        let zh_data = b"zh model";
+        let ja_hash = sha256_hex(ja_data);
+        let zh_hash = sha256_hex(zh_data);
+        fs::write(dir.path().join("g2p-ja.onnx"), ja_data).expect("write ja");
+        fs::write(dir.path().join("g2p-zh.onnx"), zh_data).expect("write zh");
+        let manifest = serde_json::json!({
+            "g2p-ja.onnx": ja_hash,
+            "g2p-zh.onnx": zh_hash
+        });
+        fs::write(
+            dir.path().join("g2p-manifest.json"),
+            manifest.to_string(),
+        )
+        .expect("write manifest");
+        let status = load_and_verify_g2p_assets(dir.path());
+        match &status {
+            G2pAssetStatus::Verified(map) => {
+                assert_eq!(map.len(), 2);
+                assert_eq!(map["g2p-ja.onnx"].sha256, ja_hash);
+                assert_eq!(map["g2p-zh.onnx"].sha256, zh_hash);
+            }
+            other => panic!("expected Verified, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn malformed_manifest_json_yields_failed_with_parse_error() {
+        let dir = TempDir::new("g2p-malformed");
+        fs::write(
+            dir.path().join("g2p-manifest.json"),
+            b"{ not valid json",
+        )
+        .expect("write manifest");
+        let status = load_and_verify_g2p_assets(dir.path());
+        match status {
+            G2pAssetStatus::Failed { error } => {
+                assert!(
+                    error.contains("cannot parse G2P manifest"),
+                    "unexpected error: {}",
+                    error
+                );
+            }
+            other => panic!("expected Failed, got {:?}", other),
+        }
+    }
+
     #[test]
     fn japanese_voice_returns_explicit_phonemization_gap() {
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -2093,5 +2478,109 @@ mod tests {
 
         assert_eq!(result.sample_rate, kokoro_vocab::SAMPLE_RATE);
         assert!(!result.pcm16.is_empty());
+    }
+
+    // ── Grupo 3: CompositePhonemizer routing tests ──────────────────────
+
+    #[test]
+    fn composite_routes_japanese_lang_code_to_onnx_leg() {
+        let espeak_calls = Arc::new(Mutex::new(Vec::new()));
+        let mock_espeak = MockPhonemizer {
+            calls: Arc::clone(&espeak_calls),
+            result: Ok(PhonemeResult { phonemes: "mock".into(), lang_code: "a" }),
+        };
+        let mut composite = CompositePhonemizer {
+            espeak: Box::new(mock_espeak),
+            onnx_g2p: OnnxG2PPhonemizer { ja: None, zh: None },
+        };
+        let voice = resolved_assets_for_voice("jf_alpha").voice;
+        let result = composite.phonemize("hello", &voice);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "phonemization is not implemented yet for lang_code='j'"
+        );
+        assert!(espeak_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn composite_routes_mandarin_lang_code_to_onnx_leg() {
+        let espeak_calls = Arc::new(Mutex::new(Vec::new()));
+        let mock_espeak = MockPhonemizer {
+            calls: Arc::clone(&espeak_calls),
+            result: Ok(PhonemeResult { phonemes: "mock".into(), lang_code: "a" }),
+        };
+        let mut composite = CompositePhonemizer {
+            espeak: Box::new(mock_espeak),
+            onnx_g2p: OnnxG2PPhonemizer { ja: None, zh: None },
+        };
+        let voice = resolved_assets_for_voice("zf_xiaobei").voice;
+        let result = composite.phonemize("hello", &voice);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "phonemization is not implemented yet for lang_code='z'"
+        );
+        assert!(espeak_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn composite_routes_english_lang_code_to_espeak_leg() {
+        let espeak_calls = Arc::new(Mutex::new(Vec::new()));
+        let mock_espeak = MockPhonemizer {
+            calls: Arc::clone(&espeak_calls),
+            result: Ok(PhonemeResult { phonemes: "hEloU".into(), lang_code: "a" }),
+        };
+        let mut composite = CompositePhonemizer {
+            espeak: Box::new(mock_espeak),
+            onnx_g2p: OnnxG2PPhonemizer { ja: None, zh: None },
+        };
+        let voice = resolved_assets_for_voice("af_heart").voice;
+        let result = composite.phonemize("hello", &voice);
+        assert!(result.is_ok());
+        let pr = result.unwrap();
+        assert_eq!(pr.phonemes, "hEloU");
+        assert_eq!(pr.lang_code, "a");
+        assert_eq!(espeak_calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn onnx_g2p_with_none_ja_returns_verbatim_legacy_error() {
+        let mut onnx = OnnxG2PPhonemizer { ja: None, zh: None };
+        let voice = resolved_assets_for_voice("jf_alpha").voice;
+        let result = onnx.phonemize("konnichiwa", &voice);
+        assert_eq!(
+            result.unwrap_err(),
+            "phonemization is not implemented yet for lang_code='j'"
+        );
+    }
+
+    #[test]
+    fn onnx_g2p_with_none_zh_returns_verbatim_legacy_error() {
+        let mut onnx = OnnxG2PPhonemizer { ja: None, zh: None };
+        let voice = resolved_assets_for_voice("zf_xiaobei").voice;
+        let result = onnx.phonemize("nihao", &voice);
+        assert_eq!(
+            result.unwrap_err(),
+            "phonemization is not implemented yet for lang_code='z'"
+        );
+    }
+
+    #[test]
+    fn onnx_g2p_with_some_ja_returns_distinct_stub_error() {
+        let mut onnx = OnnxG2PPhonemizer {
+            ja: Some(OnnxG2PSession {
+                path: PathBuf::from("/tmp/g2p-ja.onnx"),
+                verified_sha256: "abc123".into(),
+            }),
+            zh: None,
+        };
+        let voice = resolved_assets_for_voice("jf_alpha").voice;
+        let result = onnx.phonemize("konnichiwa", &voice);
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("asset present but inference path is stub"),
+            "expected stub error, got: {err}"
+        );
     }
 }
