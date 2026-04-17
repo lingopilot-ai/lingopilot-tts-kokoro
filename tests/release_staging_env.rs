@@ -167,8 +167,10 @@ fn release_staging_supports_neutral_env_names_end_to_end() {
     run_package_script(workspace.path(), &[]);
 
     let dist_dir = workspace.path().join("dist");
-    let zip_path = dist_dir.join("lingopilot-tts-kokoro-v0.1.0-windows-x86_64.zip");
-    let checksum_path = dist_dir.join("lingopilot-tts-kokoro-v0.1.0-sha256.txt");
+    let version_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let zip_name = format!("lingopilot-tts-kokoro-{version_tag}-windows-x86_64.zip");
+    let zip_path = dist_dir.join(&zip_name);
+    let checksum_path = dist_dir.join(format!("lingopilot-tts-kokoro-{version_tag}-sha256.txt"));
     assert!(
         zip_path.is_file(),
         "expected package archive at '{}'",
@@ -183,7 +185,7 @@ fn release_staging_supports_neutral_env_names_end_to_end() {
     let checksum =
         fs::read_to_string(&checksum_path).expect("checksum manifest should be readable");
     assert!(
-        checksum.contains("lingopilot-tts-kokoro-v0.1.0-windows-x86_64.zip"),
+        checksum.contains(&zip_name),
         "checksum manifest should reference the packaged archive"
     );
 }
