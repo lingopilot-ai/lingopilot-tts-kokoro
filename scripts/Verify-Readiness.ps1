@@ -145,14 +145,20 @@ function Get-LiveAssetConfiguration {
 
 Push-Location $repoRoot
 try {
+    Write-Host "[Verify-Readiness] step=assert-forbidden-cargo-lock-crates" -ForegroundColor Cyan
     .\scripts\Assert-ForbiddenCargoLockCrates.ps1
 
+    Write-Host "[Verify-Readiness] step=cargo-check" -ForegroundColor Cyan
     cargo check --locked
+
+    Write-Host "[Verify-Readiness] step=cargo-test" -ForegroundColor Cyan
     cargo test --locked
 
     if (-not $SkipLiveTests) {
+        Write-Host "[Verify-Readiness] step=live-assets-lookup" -ForegroundColor Cyan
         $liveAssets = Get-LiveAssetConfiguration
         if ($liveAssets) {
+            Write-Host "[Verify-Readiness] step=cargo-test-ignored source=$($liveAssets.Source)" -ForegroundColor Cyan
             $env:KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR = $liveAssets.RuntimeDir
             $env:KOKORO_TTS_LIVE_MODEL_DIR = $liveAssets.ModelDir
             $env:KOKORO_TTS_LIVE_ONNXRUNTIME_DLL = $liveAssets.OnnxRuntimeDll
@@ -161,6 +167,7 @@ try {
     }
 
     if ($Packaged) {
+        Write-Host "[Verify-Readiness] step=packaged-archive-smoke" -ForegroundColor Cyan
         $zip = Get-ChildItem -LiteralPath (Join-Path $repoRoot "dist") -Filter "*.zip" |
             Sort-Object -Property LastWriteTimeUtc -Descending |
             Select-Object -First 1
@@ -170,6 +177,8 @@ try {
 
         .\scripts\Test-WindowsReleaseArchive.ps1 -ZipPath $zip.FullName
     }
+
+    Write-Host "[Verify-Readiness] step=readme-check" -ForegroundColor Cyan
 
     $readme = Get-Content -LiteralPath $readmePath -Raw
     if ($readme -match "LINGOPILOT_TTS_ONNXRUNTIME_DLL") {
