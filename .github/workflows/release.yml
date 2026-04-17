@@ -39,6 +39,8 @@ jobs:
       - name: Stage release assets
         shell: pwsh
         run: .\scripts\Stage-WindowsReleaseAssets.ps1
+        env:
+          KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL: ${{ vars.KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL }}
 
       - name: Expose staged live assets
         shell: pwsh
@@ -101,6 +103,8 @@ jobs:
       - name: Stage release assets
         shell: pwsh
         run: .\scripts\Stage-WindowsReleaseAssets.ps1 -Version "${{ github.ref_name }}"
+        env:
+          KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL: ${{ vars.KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL }}
 
       - name: Package release archive
         shell: pwsh
