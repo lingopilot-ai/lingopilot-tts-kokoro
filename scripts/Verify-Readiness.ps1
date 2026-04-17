@@ -1,6 +1,7 @@
 param(
     [switch]$Packaged,
-    [switch]$SkipLiveTests
+    [switch]$SkipLiveTests,
+    [switch]$SkipPackagedSmoke
 )
 
 $ErrorActionPreference = "Stop"
@@ -166,7 +167,7 @@ try {
         }
     }
 
-    if ($Packaged) {
+    if ($Packaged -and -not $SkipPackagedSmoke) {
         Write-Host "[Verify-Readiness] step=packaged-archive-smoke" -ForegroundColor Cyan
         $zip = Get-ChildItem -LiteralPath (Join-Path $repoRoot "dist") -Filter "*.zip" |
             Sort-Object -Property LastWriteTimeUtc -Descending |

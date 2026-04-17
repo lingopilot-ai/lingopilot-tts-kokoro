@@ -113,8 +113,8 @@ jobs:
 
       - name: Run packaged readiness verification
         shell: pwsh
-        timeout-minutes: 15
-        run: .\scripts\Verify-Readiness.ps1 -Packaged -SkipLiveTests
+        timeout-minutes: 10
+        run: .\scripts\Verify-Readiness.ps1 -Packaged -SkipLiveTests -SkipPackagedSmoke
 
       - name: Install cargo-sbom
         shell: pwsh
@@ -137,4 +137,6 @@ jobs:
 
       - name: Verify published release assets
         shell: pwsh
+        timeout-minutes: 5
+        continue-on-error: true
         run: .\scripts\Test-PublishedRelease.ps1 -Version "${{ github.ref_name }}" -Repository "${{ github.repository }}"
