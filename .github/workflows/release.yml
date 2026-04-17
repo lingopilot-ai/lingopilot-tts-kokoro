@@ -104,7 +104,7 @@ jobs:
 
       - name: Package release archive
         shell: pwsh
-        run: & "${{ matrix.package_script }}" -Version "${{ github.ref_name }}"
+        run: '& "${{ matrix.package_script }}" -Version "${{ github.ref_name }}"'
 
       - name: Run packaged readiness verification
         shell: pwsh
