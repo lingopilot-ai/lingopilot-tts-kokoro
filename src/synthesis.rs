@@ -10,6 +10,7 @@ use libloading::Library;
 use sha2::{Sha256, Digest};
 use ndarray::{Array2, Array3, ArrayD, Axis, Ix2, Ix3};
 use ndarray_npy::NpzReader;
+use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::value::{Tensor, TensorElementType};
 use ort::{self, ep};
@@ -593,6 +594,8 @@ impl OrtKokoroRuntime {
 
         let session = Session::builder()
             .map_err(|error| format!("Cannot create ONNX Runtime session builder: {error}"))?
+            .with_optimization_level(GraphOptimizationLevel::Level1)
+            .map_err(|error| format!("Cannot set optimization level: {error}"))?
             .with_execution_providers(providers)
             .map_err(|error| {
                 format!("Cannot configure Kokoro {ep_label} execution provider: {error}")
@@ -1282,7 +1285,6 @@ fn ensure_onnxruntime_loaded() -> Result<(), String> {
                     error
                 )
             })?
-            .with_execution_providers([ep::CPU::default().build()])
             .commit();
         Ok(())
     });
