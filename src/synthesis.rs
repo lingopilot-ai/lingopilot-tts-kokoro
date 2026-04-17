@@ -7,7 +7,8 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use libloading::Library;
-use sha2::{Sha256, Digest};
+#[cfg(feature = "kokoro-g2p-onnx")]
+use sha2::{Digest, Sha256};
 use ndarray::{Array2, Array3, ArrayD, Axis, Ix2, Ix3};
 use ndarray_npy::NpzReader;
 use ort::session::builder::GraphOptimizationLevel;
@@ -107,17 +108,22 @@ pub struct SynthesisCache {
     phonemizer: Box<dyn Phonemizer>,
     runtime_factory: Box<dyn RuntimeFactory>,
     runtimes: HashMap<RuntimeKey, Box<dyn KokoroRuntime>>,
+    #[cfg(feature = "kokoro-g2p-onnx")]
     g2p_asset_cache: HashMap<PathBuf, G2pAssetStatus>,
 }
 
 impl SynthesisCache {
     pub fn new(espeak_data_dir: PathBuf, execution_provider: ExecutionProvider) -> Self {
-        let composite = CompositePhonemizer {
+        #[cfg(feature = "kokoro-g2p-onnx")]
+        let phonemizer: Box<dyn Phonemizer> = Box::new(CompositePhonemizer {
             espeak: Box::new(EspeakPhonemizer::new(espeak_data_dir)),
             onnx_g2p: OnnxG2PPhonemizer { ja: None, zh: None },
-        };
+        });
+        #[cfg(not(feature = "kokoro-g2p-onnx"))]
+        let phonemizer: Box<dyn Phonemizer> =
+            Box::new(EspeakPhonemizer::new(espeak_data_dir));
         Self::with_components(
-            Box::new(composite),
+            phonemizer,
             Box::new(OrtRuntimeFactory { execution_provider }),
         )
     }
@@ -130,6 +136,7 @@ impl SynthesisCache {
             phonemizer,
             runtime_factory,
             runtimes: HashMap::new(),
+            #[cfg(feature = "kokoro-g2p-onnx")]
             g2p_asset_cache: HashMap::new(),
         }
     }
@@ -140,6 +147,7 @@ impl SynthesisCache {
         assets: &ResolvedModelAssets,
         speed: f32,
     ) -> Result<SynthResult, String> {
+        #[cfg(feature = "kokoro-g2p-onnx")]
         if matches!(assets.voice.lang_code, "j" | "z") {
             if let Some(model_dir) = assets.model_path.parent() {
                 self.g2p_asset_cache
@@ -965,12 +973,14 @@ where
     }
 }
 
+#[cfg(feature = "kokoro-g2p-onnx")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VerifiedG2pAsset {
     pub(crate) path: PathBuf,
     pub(crate) sha256: String,
 }
 
+#[cfg(feature = "kokoro-g2p-onnx")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum G2pAssetStatus {
     Skipped,
@@ -978,6 +988,7 @@ pub(crate) enum G2pAssetStatus {
     Failed { error: String },
 }
 
+#[cfg(feature = "kokoro-g2p-onnx")]
 fn parse_g2p_manifest(path: &Path) -> Result<HashMap<String, String>, String> {
     let content = fs::read_to_string(path).map_err(|e| {
         format!("cannot read G2P manifest '{}': {}", path.display(), e)
@@ -998,6 +1009,7 @@ fn parse_g2p_manifest(path: &Path) -> Result<HashMap<String, String>, String> {
     Ok(map)
 }
 
+#[cfg(feature = "kokoro-g2p-onnx")]
 fn compute_sha256(path: &Path) -> Result<String, String> {
     let mut file = File::open(path).map_err(|e| {
         format!("cannot open '{}': {}", path.display(), e)
@@ -1009,6 +1021,7 @@ fn compute_sha256(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+#[cfg(feature = "kokoro-g2p-onnx")]
 fn load_and_verify_g2p_assets(model_dir: &Path) -> G2pAssetStatus {
     let manifest_path = model_dir.join("g2p-manifest.json");
     let manifest_exists = manifest_path.is_file();
@@ -1096,16 +1109,19 @@ fn load_and_verify_g2p_assets(model_dir: &Path) -> G2pAssetStatus {
     G2pAssetStatus::Verified(verified)
 }
 
+#[cfg(feature = "kokoro-g2p-onnx")]
 struct OnnxG2PSession {
     path: PathBuf,
     verified_sha256: String,
 }
 
+#[cfg(feature = "kokoro-g2p-onnx")]
 struct OnnxG2PPhonemizer {
     ja: Option<OnnxG2PSession>,
     zh: Option<OnnxG2PSession>,
 }
 
+#[cfg(feature = "kokoro-g2p-onnx")]
 impl Phonemizer for OnnxG2PPhonemizer {
     fn phonemize(&mut self, _text: &str, voice: &ResolvedVoice) -> Result<PhonemeResult, String> {
         let session = match voice.lang_code {
@@ -1129,11 +1145,13 @@ impl Phonemizer for OnnxG2PPhonemizer {
     }
 }
 
+#[cfg(feature = "kokoro-g2p-onnx")]
 struct CompositePhonemizer {
     espeak: Box<dyn Phonemizer>,
     onnx_g2p: OnnxG2PPhonemizer,
 }
 
+#[cfg(feature = "kokoro-g2p-onnx")]
 impl Phonemizer for CompositePhonemizer {
     fn phonemize(&mut self, text: &str, voice: &ResolvedVoice) -> Result<PhonemeResult, String> {
         match voice.lang_code {
@@ -1615,14 +1633,17 @@ pub fn phonemize_for_test(
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_sha256, filter_phonemes_to_vocab, float_audio_to_pcm16,
-        load_and_verify_g2p_assets, load_voice_styles, normalize_english_phonemes,
-        parse_g2p_manifest, platform_espeak_library_name, platform_onnxruntime_library_name,
-        resolve_espeak_library_path, resolve_model_assets, resolve_onnxruntime_library_path_for,
-        split_phonemes_for_inference, tokenize_phonemes, validate_espeak_data_dir,
-        validate_model_dir, ExecutionProvider, G2pAssetStatus, KokoroRuntime, PhonemeResult,
-        ResolvedModelAssets, ResolvedVoice, RuntimeFactory, RuntimeKey, SynthesisCache,
-        VerifiedG2pAsset, ORT_DYLIB_PATH_ENV, CompositePhonemizer, OnnxG2PPhonemizer,
+        filter_phonemes_to_vocab, float_audio_to_pcm16, load_voice_styles,
+        normalize_english_phonemes, platform_espeak_library_name,
+        platform_onnxruntime_library_name, resolve_espeak_library_path, resolve_model_assets,
+        resolve_onnxruntime_library_path_for, split_phonemes_for_inference, tokenize_phonemes,
+        validate_espeak_data_dir, validate_model_dir, ExecutionProvider, KokoroRuntime,
+        PhonemeResult, ResolvedModelAssets, ResolvedVoice, RuntimeFactory, RuntimeKey,
+        SynthesisCache, ORT_DYLIB_PATH_ENV,
+    };
+    #[cfg(feature = "kokoro-g2p-onnx")]
+    use super::{
+        load_and_verify_g2p_assets, CompositePhonemizer, G2pAssetStatus, OnnxG2PPhonemizer,
         OnnxG2PSession, Phonemizer,
     };
     use crate::kokoro_vocab;
@@ -2207,11 +2228,13 @@ mod tests {
         assert_eq!(synth_calls.lock().expect("calls should lock").len(), 2);
     }
 
+    #[cfg(feature = "kokoro-g2p-onnx")]
     fn sha256_hex(data: &[u8]) -> String {
         use sha2::{Digest, Sha256};
         format!("{:x}", Sha256::digest(data))
     }
 
+    #[cfg(feature = "kokoro-g2p-onnx")]
     #[test]
     fn manifest_and_files_both_absent_yields_skipped() {
         let dir = TempDir::new("g2p-absent");
@@ -2219,6 +2242,7 @@ mod tests {
         assert_eq!(status, G2pAssetStatus::Skipped);
     }
 
+    #[cfg(feature = "kokoro-g2p-onnx")]
     #[test]
     fn file_present_without_manifest_entry_yields_failed_unmanifested() {
         let dir = TempDir::new("g2p-unmanifested");
@@ -2236,6 +2260,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "kokoro-g2p-onnx")]
     #[test]
     fn manifest_entry_without_file_yields_failed_missing() {
         let dir = TempDir::new("g2p-missing");
@@ -2260,6 +2285,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "kokoro-g2p-onnx")]
     #[test]
     fn hash_mismatch_yields_failed_with_prefix() {
         let dir = TempDir::new("g2p-mismatch");
@@ -2286,6 +2312,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "kokoro-g2p-onnx")]
     #[test]
     fn hash_match_for_ja_only_yields_verified_with_one_entry() {
         let dir = TempDir::new("g2p-ja-only");
@@ -2310,6 +2337,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "kokoro-g2p-onnx")]
     #[test]
     fn hash_match_for_both_languages_yields_verified_with_two_entries() {
         let dir = TempDir::new("g2p-both-langs");
@@ -2339,6 +2367,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "kokoro-g2p-onnx")]
     #[test]
     fn malformed_manifest_json_yields_failed_with_parse_error() {
         let dir = TempDir::new("g2p-malformed");
@@ -2484,6 +2513,7 @@ mod tests {
 
     // ── Grupo 3: CompositePhonemizer routing tests ──────────────────────
 
+    #[cfg(feature = "kokoro-g2p-onnx")]
     #[test]
     fn composite_routes_japanese_lang_code_to_onnx_leg() {
         let espeak_calls = Arc::new(Mutex::new(Vec::new()));
@@ -2505,6 +2535,7 @@ mod tests {
         assert!(espeak_calls.lock().unwrap().is_empty());
     }
 
+    #[cfg(feature = "kokoro-g2p-onnx")]
     #[test]
     fn composite_routes_mandarin_lang_code_to_onnx_leg() {
         let espeak_calls = Arc::new(Mutex::new(Vec::new()));
@@ -2526,6 +2557,7 @@ mod tests {
         assert!(espeak_calls.lock().unwrap().is_empty());
     }
 
+    #[cfg(feature = "kokoro-g2p-onnx")]
     #[test]
     fn composite_routes_english_lang_code_to_espeak_leg() {
         let espeak_calls = Arc::new(Mutex::new(Vec::new()));
@@ -2546,6 +2578,7 @@ mod tests {
         assert_eq!(espeak_calls.lock().unwrap().len(), 1);
     }
 
+    #[cfg(feature = "kokoro-g2p-onnx")]
     #[test]
     fn onnx_g2p_with_none_ja_returns_verbatim_legacy_error() {
         let mut onnx = OnnxG2PPhonemizer { ja: None, zh: None };
@@ -2557,6 +2590,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "kokoro-g2p-onnx")]
     #[test]
     fn onnx_g2p_with_none_zh_returns_verbatim_legacy_error() {
         let mut onnx = OnnxG2PPhonemizer { ja: None, zh: None };
@@ -2568,6 +2602,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "kokoro-g2p-onnx")]
     #[test]
     fn onnx_g2p_with_some_ja_returns_distinct_stub_error() {
         let mut onnx = OnnxG2PPhonemizer {

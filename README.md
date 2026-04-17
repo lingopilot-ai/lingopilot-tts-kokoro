@@ -54,11 +54,11 @@ Current release contract:
 - Checksum manifest: `lingopilot-tts-kokoro-v<version>-sha256.txt`
 - Download base: `https://github.com/lingopilot-ai/lingopilot-tts-kokoro/releases/download/v<version>/`
 
-Example URLs for `v0.1.0`:
+Example URLs for `v0.1.1`:
 
 ```text
-https://github.com/lingopilot-ai/lingopilot-tts-kokoro/releases/download/v0.1.0/lingopilot-tts-kokoro-v0.1.0-windows-x86_64.zip
-https://github.com/lingopilot-ai/lingopilot-tts-kokoro/releases/download/v0.1.0/lingopilot-tts-kokoro-v0.1.0-sha256.txt
+https://github.com/lingopilot-ai/lingopilot-tts-kokoro/releases/download/v0.1.1/lingopilot-tts-kokoro-v0.1.1-windows-x86_64.zip
+https://github.com/lingopilot-ai/lingopilot-tts-kokoro/releases/download/v0.1.1/lingopilot-tts-kokoro-v0.1.1-sha256.txt
 ```
 
 ### 2. Extract the package
@@ -66,7 +66,7 @@ https://github.com/lingopilot-ai/lingopilot-tts-kokoro/releases/download/v0.1.0/
 The Windows zip contains one top-level folder named after the asset:
 
 ```text
-lingopilot-tts-kokoro-v0.1.0-windows-x86_64/
+lingopilot-tts-kokoro-v0.1.1-windows-x86_64/
   lingopilot-tts-kokoro.exe
   onnxruntime.dll
   espeak-runtime/
@@ -79,7 +79,7 @@ lingopilot-tts-kokoro-v0.1.0-windows-x86_64/
 ### 3. Start the sidecar
 
 ```powershell
-$packageRoot = "C:\absolute\path\to\lingopilot-tts-kokoro-v0.1.0-windows-x86_64"
+$packageRoot = "C:\absolute\path\to\lingopilot-tts-kokoro-v0.1.1-windows-x86_64"
 $runtimeDir = Join-Path $packageRoot "espeak-runtime"
 
 & (Join-Path $packageRoot "lingopilot-tts-kokoro.exe") --espeak-data-dir $runtimeDir
@@ -88,7 +88,7 @@ $runtimeDir = Join-Path $packageRoot "espeak-runtime"
 On successful startup, the sidecar emits exactly one newline-delimited `ready` JSON object on `stdout`:
 
 ```json
-{"type":"ready","version":"0.1.0"}
+{"type":"ready","version":"0.1.1"}
 ```
 
 ### 4. Send a request
@@ -293,13 +293,13 @@ Local verification commands:
 ```powershell
 .\scripts\Verify-Readiness.ps1
 .\scripts\Verify-Readiness.ps1 -Packaged
-.\scripts\Test-PublishedRelease.ps1 -Version v0.1.0
+.\scripts\Test-PublishedRelease.ps1 -Version v0.1.1
 ```
 
 Published release verification:
 
 ```powershell
-.\scripts\Test-PublishedRelease.ps1 -Version v0.1.0 -Repository lingopilot-ai/lingopilot-tts-kokoro
+.\scripts\Test-PublishedRelease.ps1 -Version v0.1.1 -Repository lingopilot-ai/lingopilot-tts-kokoro
 ```
 
 That helper downloads the published zip and SHA-256 manifest from GitHub Releases, verifies the checksum, and then runs the packaged smoke test.
