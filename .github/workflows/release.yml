@@ -129,7 +129,7 @@ jobs:
 
       - name: Smoke test packaged archive
         shell: pwsh
-        timeout-minutes: 15
+        timeout-minutes: 5
         continue-on-error: true
         run: .\scripts\Test-WindowsReleaseArchive.ps1 -ZipPath "dist/lingopilot-tts-kokoro-${{ github.ref_name }}-${{ matrix.archive_suffix }}"
 

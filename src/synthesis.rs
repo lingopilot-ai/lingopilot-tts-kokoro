@@ -590,14 +590,9 @@ impl OrtKokoroRuntime {
         let providers = match execution_provider {
             ExecutionProvider::Cpu => vec![ep::CPU::default().build()],
             ExecutionProvider::DirectMl => {
-                #[cfg(target_os = "windows")]
-                {
-                    vec![ep::DirectML::default().with_device_id(0).build()]
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    unreachable!("directml rejected at startup on non-Windows");
-                }
+                return Err(
+                    "DirectML execution provider is disabled in this build (diagnostic isolation). Use --execution-provider cpu.".to_string()
+                );
             }
         };
         let ep_label = match execution_provider {

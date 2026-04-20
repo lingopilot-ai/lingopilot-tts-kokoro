@@ -30,7 +30,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["api-24", "load-dynamic", "ndarray", "std", "directml"] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["api-24", "load-dynamic", "ndarray", "std"] }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["api-24", "load-dynamic", "ndarray", "std"] }
