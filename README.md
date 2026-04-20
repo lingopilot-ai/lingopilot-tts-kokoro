@@ -18,7 +18,7 @@ Only Windows `x86_64` is a released artifact target today. Linux and macOS packa
 
 ## Current State
 
-This repository is `READY` for Windows `x86_64`: `v0.1.0` is published and smoke-tested end to end. Japanese and Mandarin synthesis, and Linux/macOS release artifacts, are explicitly deferred (see below).
+This repository is **Technical Ready** and **Operational Ready** for Windows `x86_64` at `v0.1.2`: the source tree is green, and the packaged + published release smoke tests cover end-to-end synthesis. **Release Ready is pending** — the latency baseline is not yet captured (E-09), the production-readiness ADR remains `Proposed` (E-10), and the `windows-latest` packaged-smoke hang investigation is open (E-08). See [docs/adr-production-readiness.md §4a](docs/adr-production-readiness.md) for the tier definitions and [docs/controlled-ambitions.md](docs/controlled-ambitions.md) for open risks. Japanese and Mandarin synthesis, and Linux/macOS release artifacts, are explicitly deferred (see below).
 
 What works now:
 
@@ -30,7 +30,7 @@ What works now:
 - real PCM16 output on successful synthesis
 - real English phonemization for `af_*` / `am_*` / `bf_*` / `bm_*`
 - deterministic eSpeak-backed phonemization for `ef_*` / `em_*`, `ff_*`, `hf_*` / `hm_*`, `if_*` / `im_*`, and `pf_*` / `pm_*`
-- Windows `v0.1.0` GitHub Release published and smoke-tested end to end
+- Windows `v0.1.2` GitHub Release published and smoke-tested end to end
 - opt-in DirectML execution provider on Windows (CPU remains the default)
 
 What does not work yet:
@@ -43,6 +43,17 @@ What does not work yet:
 
 Treat the host-facing protocol as stable enough to integrate and test. Do not treat this repository as a fully closed, cross-platform product release yet.
 
+### Support tiers
+
+| Tier | Scope | Status |
+|------|-------|--------|
+| Supported | Windows `x86_64`, CPU execution provider | Released via GitHub Releases; smoke-tested end to end |
+| Experimental (opt-in) | Windows `x86_64`, DirectML execution provider | Accepted via `--execution-provider directml`; not part of the release floor (see [docs/controlled-ambitions.md](docs/controlled-ambitions.md)) |
+| Deferred | Japanese (`jf_*`/`jm_*`) and Mandarin (`zf_*`/`zm_*`) synthesis | Fails explicitly; tracked in [docs/controlled-ambitions.md](docs/controlled-ambitions.md) |
+| Scaffolding only | Linux `x86_64` / `aarch64`, macOS `x86_64` / `aarch64` | CI builds and tests only; no published release asset |
+
+Promotion criteria between tiers are recorded in [docs/controlled-ambitions.md](docs/controlled-ambitions.md).
+
 ## Quick Start
 
 ### 1. Download a Windows release
@@ -54,11 +65,11 @@ Current release contract:
 - Checksum manifest: `lingopilot-tts-kokoro-v<version>-sha256.txt`
 - Download base: `https://github.com/lingopilot-ai/lingopilot-tts-kokoro/releases/download/v<version>/`
 
-Example URLs for `v0.1.1`:
+Example URLs for `v0.1.2`:
 
 ```text
-https://github.com/lingopilot-ai/lingopilot-tts-kokoro/releases/download/v0.1.1/lingopilot-tts-kokoro-v0.1.1-windows-x86_64.zip
-https://github.com/lingopilot-ai/lingopilot-tts-kokoro/releases/download/v0.1.1/lingopilot-tts-kokoro-v0.1.1-sha256.txt
+https://github.com/lingopilot-ai/lingopilot-tts-kokoro/releases/download/v0.1.2/lingopilot-tts-kokoro-v0.1.2-windows-x86_64.zip
+https://github.com/lingopilot-ai/lingopilot-tts-kokoro/releases/download/v0.1.2/lingopilot-tts-kokoro-v0.1.2-sha256.txt
 ```
 
 ### 2. Extract the package
@@ -66,7 +77,7 @@ https://github.com/lingopilot-ai/lingopilot-tts-kokoro/releases/download/v0.1.1/
 The Windows zip contains one top-level folder named after the asset:
 
 ```text
-lingopilot-tts-kokoro-v0.1.1-windows-x86_64/
+lingopilot-tts-kokoro-v0.1.2-windows-x86_64/
   lingopilot-tts-kokoro.exe
   onnxruntime.dll
   espeak-runtime/
@@ -79,7 +90,7 @@ lingopilot-tts-kokoro-v0.1.1-windows-x86_64/
 ### 3. Start the sidecar
 
 ```powershell
-$packageRoot = "C:\absolute\path\to\lingopilot-tts-kokoro-v0.1.1-windows-x86_64"
+$packageRoot = "C:\absolute\path\to\lingopilot-tts-kokoro-v0.1.2-windows-x86_64"
 $runtimeDir = Join-Path $packageRoot "espeak-runtime"
 
 & (Join-Path $packageRoot "lingopilot-tts-kokoro.exe") --espeak-data-dir $runtimeDir
@@ -88,13 +99,13 @@ $runtimeDir = Join-Path $packageRoot "espeak-runtime"
 On successful startup, the sidecar emits exactly one newline-delimited `ready` JSON object on `stdout`:
 
 ```json
-{"type":"ready","version":"0.1.1"}
+{"type":"ready","version":"0.1.2"}
 ```
 
 ### 4. Send a request
 
 ```json
-{"text":"Hello from Kokoro","voice":"af_heart","speed":1.0,"model_dir":"C:\\absolute\\path\\to\\lingopilot-tts-kokoro-v0.1.0-windows-x86_64\\kokoro-model"}
+{"text":"Hello from Kokoro","voice":"af_heart","speed":1.0,"model_dir":"C:\\absolute\\path\\to\\lingopilot-tts-kokoro-v0.1.2-windows-x86_64\\kokoro-model"}
 ```
 
 ### 5. Read the response
@@ -256,10 +267,10 @@ The sidecar currently infers `lang_code` from the official Kokoro voice prefixes
 | `hf_`, `hm_` | Hindi | Supported |
 | `if_`, `im_` | Italian | Supported |
 | `pf_`, `pm_` | Brazilian Portuguese | Supported |
-| `jf_`, `jm_` | Japanese | Not implemented in `v0.1.0` |
-| `zf_`, `zm_` | Mandarin Chinese | Not implemented in `v0.1.0` |
+| `jf_`, `jm_` | Japanese | Deferred (not implemented; see [docs/controlled-ambitions.md](docs/controlled-ambitions.md)) |
+| `zf_`, `zm_` | Mandarin Chinese | Deferred (not implemented; see [docs/controlled-ambitions.md](docs/controlled-ambitions.md)) |
 
-For `v0.1.0`, unsupported Japanese and Mandarin families fail explicitly with an `error` response instead of silently falling back. Hosts must route those languages to `lingopilot-tts-piper` or another engine.
+Unsupported Japanese and Mandarin families fail explicitly with an `error` response instead of silently falling back. Hosts must route those languages to `lingopilot-tts-piper` or another engine. See [docs/controlled-ambitions.md](docs/controlled-ambitions.md) for the deferral policy.
 
 ## Differences From `lingopilot-tts-piper`
 
@@ -293,13 +304,13 @@ Local verification commands:
 ```powershell
 .\scripts\Verify-Readiness.ps1
 .\scripts\Verify-Readiness.ps1 -Packaged
-.\scripts\Test-PublishedRelease.ps1 -Version v0.1.1
+.\scripts\Test-PublishedRelease.ps1 -Version v0.1.2
 ```
 
 Published release verification:
 
 ```powershell
-.\scripts\Test-PublishedRelease.ps1 -Version v0.1.1 -Repository lingopilot-ai/lingopilot-tts-kokoro
+.\scripts\Test-PublishedRelease.ps1 -Version v0.1.2 -Repository lingopilot-ai/lingopilot-tts-kokoro
 ```
 
 That helper downloads the published zip and SHA-256 manifest from GitHub Releases, verifies the checksum, and then runs the packaged smoke test.
@@ -398,12 +409,12 @@ When Linux and macOS packaging is added, this repository should keep one GitHub 
 Planned asset naming:
 
 ```text
-lingopilot-tts-kokoro-v0.1.0-windows-x86_64.zip
-lingopilot-tts-kokoro-v0.1.0-linux-x86_64.tar.gz
-lingopilot-tts-kokoro-v0.1.0-linux-aarch64.tar.gz
-lingopilot-tts-kokoro-v0.1.0-macos-x86_64.tar.gz
-lingopilot-tts-kokoro-v0.1.0-macos-aarch64.tar.gz
-lingopilot-tts-kokoro-v0.1.0-sha256.txt
+lingopilot-tts-kokoro-${LATEST_RELEASE}-windows-x86_64.zip
+lingopilot-tts-kokoro-${LATEST_RELEASE}-linux-x86_64.tar.gz
+lingopilot-tts-kokoro-${LATEST_RELEASE}-linux-aarch64.tar.gz
+lingopilot-tts-kokoro-${LATEST_RELEASE}-macos-x86_64.tar.gz
+lingopilot-tts-kokoro-${LATEST_RELEASE}-macos-aarch64.tar.gz
+lingopilot-tts-kokoro-${LATEST_RELEASE}-sha256.txt
 ```
 
 Platform-specific runtime library names:
@@ -417,8 +428,8 @@ Platform-specific runtime library names:
 Canonical asset-plan helper:
 
 ```powershell
-.\scripts\Get-ReleaseAssetPlan.ps1 -Version v0.1.0
-.\scripts\Get-ReleaseAssetPlan.ps1 -Version v0.1.0 -AsJson
+.\scripts\Get-ReleaseAssetPlan.ps1 -Version ${LATEST_RELEASE}
+.\scripts\Get-ReleaseAssetPlan.ps1 -Version ${LATEST_RELEASE} -AsJson
 ```
 
 Packaging scaffolds for future explicit-input local assembly:
@@ -430,7 +441,7 @@ Packaging scaffolds for future explicit-input local assembly:
   -ModelDir C:\abs\kokoro-model `
   -OnnxRuntimeLibrary C:\abs\linux\libonnxruntime.so `
   -EspeakRuntimeDir C:\abs\linux\espeak-runtime `
-  -Version v0.1.0
+  -Version ${LATEST_RELEASE}
 ```
 
 ```powershell
@@ -440,22 +451,22 @@ Packaging scaffolds for future explicit-input local assembly:
   -ModelDir C:\abs\kokoro-model `
   -OnnxRuntimeLibrary C:\abs\macos\libonnxruntime.dylib `
   -EspeakRuntimeDir C:\abs\macos\espeak-runtime `
-  -Version v0.1.0
+  -Version ${LATEST_RELEASE}
 ```
 
 Those scripts only assemble archives from explicit inputs. They do not mean Linux or macOS are currently supported release targets by this repository.
 
 ## Latency
 
-Warm-inference p-quantiles for the v0.1.0 release, captured by the `windows-bench` CI job against the frozen baseline at [benches/baseline.json](benches/baseline.json). Regressions of `Δp95 > +10 %` vs. the frozen baseline fail the bench gate on PRs and the `bench-gate` job on release tags.
+Warm-inference p-quantiles for the current release, captured by the `windows-bench` CI job against the frozen baseline at [benches/baseline.json](benches/baseline.json). Regressions of `Δp95 > +10 %` vs. the frozen baseline fail the bench gate on PRs and the `bench-gate` job on release tags. First capture is pending — tracked as **E-09** in [BACKLOG.md](BACKLOG.md).
 
 | Version | Voice | 1s p50 / p95 / p99 (ms) | 5s p50 / p95 / p99 (ms) | 20s p50 / p95 / p99 (ms) |
 | --- | --- | --- | --- | --- |
-| v0.1.0 (pending first capture) | af_heart | — / — / — | — / — / — | — / — / — |
-| v0.1.0 (pending first capture) | pf_dora | — / — / — | — / — / — | — / — / — |
-| v0.1.0 (pending first capture) | ef_alice | — / — / — | — / — / — | — / — / — |
+| v0.1.2 (pending first capture) | af_heart | — / — / — | — / — / — | — / — / — |
+| v0.1.2 (pending first capture) | pf_dora | — / — / — | — / — / — | — / — / — |
+| v0.1.2 (pending first capture) | ef_alice | — / — / — | — / — / — | — / — / — |
 
-Runner hardware class: github-hosted `windows-latest` (Azure Standard_D4ads_v5, 4 vCPU AMD EPYC 7763, 16 GiB RAM). Measurements are warm-inference p-quantiles over N=50 per cell; cold-start variance is intentionally excluded. The `v0.1.0` row is populated from a first green `windows-bench` run on `main` via [scripts/Update-BenchBaseline.ps1](scripts/Update-BenchBaseline.ps1), which requires PR-checklist + CODEOWNERS review to rotate.
+Runner hardware class: github-hosted `windows-latest` (Azure Standard_D4ads_v5, 4 vCPU AMD EPYC 7763, 16 GiB RAM). Measurements are warm-inference p-quantiles over N=50 per cell; cold-start variance is intentionally excluded. Each row is populated from a first green `windows-bench` run on `main` via [scripts/Update-BenchBaseline.ps1](scripts/Update-BenchBaseline.ps1), which requires PR-checklist + CODEOWNERS review to rotate.
 
 ## Upstream References
 
