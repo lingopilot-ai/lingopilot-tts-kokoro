@@ -203,6 +203,7 @@ impl SynthesisCache {
 
         let voice_id = assets.voice.voice_id.clone();
         let chunk_count = phoneme_chunks.len();
+        tracing::info!(event = "sentinel_A_pre_runtime_mut_call");
         let runtime = self.runtime_mut(assets)?;
         let mut samples = Vec::new();
 
@@ -230,6 +231,7 @@ impl SynthesisCache {
         &mut self,
         assets: &ResolvedModelAssets,
     ) -> Result<&mut (dyn KokoroRuntime + '_), String> {
+        tracing::info!(event = "sentinel_B_runtime_mut_entered");
         let key = RuntimeKey::from_assets(assets);
         if !self.runtimes.contains_key(&key) {
             tracing::debug!(
@@ -237,6 +239,7 @@ impl SynthesisCache {
                 model_path = assets.model_path.display().to_string(),
                 voices_path = assets.voices_path.display().to_string()
             );
+            tracing::info!(event = "sentinel_C_pre_runtime_factory_load");
             let load_start = Instant::now();
             let runtime = self.runtime_factory.load(assets)?;
             let load_elapsed = load_start.elapsed();

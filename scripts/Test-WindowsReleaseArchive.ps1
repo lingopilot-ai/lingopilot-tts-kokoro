@@ -203,10 +203,10 @@ try {
     Write-Host "[smoke] writing synthesis request to stdin..."
     $process.StandardInput.WriteLine($request)
     $process.StandardInput.Flush()
-    Write-Host "[smoke] request flushed, awaiting audio response line..."
+    Write-Host "[smoke] request flushed at $(Get-Date -Format o), awaiting audio response line..."
 
     $audioLine = Read-ProtocolLine -Stream $stdout
-    Write-Host "[smoke] audio response line received"
+    Write-Host "[smoke] audio response line received at $(Get-Date -Format o)"
     if ([string]::IsNullOrWhiteSpace($audioLine)) {
         throw "Smoke test failed: the packaged binary did not emit an audio response."
     }
