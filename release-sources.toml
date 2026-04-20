@@ -13,8 +13,10 @@ url = "https://github.com/lingopilot-ai/lingopilot-tts-kokoro/releases/download/
 sha256 = ""
 
 [onnxruntime]
-url = "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-win-x64-1.20.1.zip"
-sha256 = ""
+# Must match the API version the `ort` crate is built against (api-24 → ORT 1.24.x).
+# 1.20.x DLLs only expose GetApi up to version 20 and cause ort::init_from to stall.
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxruntime-win-x64-1.24.4.zip"
+sha256 = "d2319fddfb6ea4db99ccc4b60c85c517bcd855721f5daa6a06d40d7cb2ee2357"
 
 [onnxruntime_linux_x64]
 # Consumed by scripts/Stage-PosixReleaseAssets.ps1 on ubuntu-latest runners (E-02).
