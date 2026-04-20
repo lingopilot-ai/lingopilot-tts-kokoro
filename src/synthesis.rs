@@ -580,7 +580,9 @@ impl OrtKokoroRuntime {
         assets: &ResolvedModelAssets,
         execution_provider: ExecutionProvider,
     ) -> Result<Self, String> {
+        tracing::info!(event = "sentinel_L1_pre_ensure_onnxruntime");
         ensure_onnxruntime_loaded()?;
+        tracing::info!(event = "sentinel_L2_post_ensure_onnxruntime");
 
         // NO silent fallback to CPU on DirectML registration failure: per
         // `AGENTS.md §10.2`, DirectML errors surface to the host through the
@@ -603,14 +605,19 @@ impl OrtKokoroRuntime {
             ExecutionProvider::DirectMl => "DirectML",
         };
 
-        let session = Session::builder()
+        tracing::info!(event = "sentinel_L3_pre_session_builder");
+        let mut session_builder = Session::builder()
             .map_err(|error| format!("Cannot create ONNX Runtime session builder: {error}"))?
             .with_optimization_level(GraphOptimizationLevel::Level1)
             .map_err(|error| format!("Cannot set optimization level: {error}"))?
             .with_execution_providers(providers)
             .map_err(|error| {
                 format!("Cannot configure Kokoro {ep_label} execution provider: {error}")
-            })?
+            })?;
+        tracing::info!(event = "sentinel_L4_post_with_execution_providers");
+
+        tracing::info!(event = "sentinel_L5_pre_commit_from_file");
+        let session = session_builder
             .commit_from_file(&assets.model_path)
             .map_err(|error| {
                 format!(
@@ -619,9 +626,12 @@ impl OrtKokoroRuntime {
                     error
                 )
             })?;
+        tracing::info!(event = "sentinel_L6_post_commit_from_file");
 
         let input_config = RuntimeInputConfig::from_session(&session)?;
+        tracing::info!(event = "sentinel_L7_post_input_config");
         let voice_styles = load_voice_styles(&assets.voices_path)?;
+        tracing::info!(event = "sentinel_L8_post_load_voice_styles");
 
         tracing::debug!(
             event = "kokoro_runtime_loaded",
