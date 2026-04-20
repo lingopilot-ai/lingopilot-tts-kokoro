@@ -157,6 +157,15 @@ try {
     $null = Resolve-RequiredBundleFile -ModelDir $modelDir -Pattern "*.onnx" -Description "Kokoro model (*.onnx)"
     $null = Resolve-RequiredBundleFile -ModelDir $modelDir -Pattern "voices*.bin" -Description "Kokoro voices bundle (voices*.bin)"
 
+    $defenderExclusionAdded = $false
+    try {
+        Add-MpPreference -ExclusionPath $packageRoot -ErrorAction Stop
+        $defenderExclusionAdded = $true
+        Write-Host "[smoke] registered Windows Defender exclusion for $packageRoot"
+    } catch {
+        Write-Host "[smoke] Add-MpPreference unavailable or failed; continuing without Defender exclusion ($($_.Exception.Message))"
+    }
+
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $binaryPath
     $startInfo.ArgumentList.Add("--espeak-data-dir")
@@ -258,6 +267,9 @@ try {
     Write-Host "Smoke test passed for $resolvedZipPath" -ForegroundColor Green
 }
 finally {
+    if ($defenderExclusionAdded) {
+        try { Remove-MpPreference -ExclusionPath $packageRoot -ErrorAction SilentlyContinue } catch {}
+    }
     if (Test-Path $extractRoot) {
         Remove-Item -LiteralPath $extractRoot -Recurse -Force
     }
