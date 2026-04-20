@@ -166,6 +166,41 @@ try {
         Write-Host "[smoke] Add-MpPreference unavailable or failed; continuing without Defender exclusion ($($_.Exception.Message))"
     }
 
+    Write-Host "[smoke] onnxruntime.dll probe starting at $(Get-Date -Format o)"
+    try {
+        $dllHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $onnxRuntimeDll).Hash
+        $dllItem = Get-Item -LiteralPath $onnxRuntimeDll
+        $dllVersion = $dllItem.VersionInfo.FileVersion
+        $dllLength = $dllItem.Length
+        $dllSig = (Get-AuthenticodeSignature -LiteralPath $onnxRuntimeDll)
+        Write-Host "[smoke] dll metadata length=$dllLength version=$dllVersion sha256=$dllHash sig_status=$($dllSig.Status) sig_signer=$($dllSig.SignerCertificate.Subject)"
+    } catch {
+        Write-Host "[smoke] dll metadata probe failed: $($_.Exception.Message)"
+    }
+
+    try {
+        Add-Type -Namespace LpTtsProbe -Name Kernel32 -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true, CharSet=System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern System.IntPtr LoadLibraryExW(string lpLibFileName, System.IntPtr hFile, uint dwFlags);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)]
+public static extern bool FreeLibrary(System.IntPtr hModule);
+'@ -ErrorAction Stop
+        $probeStart = Get-Date
+        Write-Host "[smoke] LoadLibraryExW call starting at $(Get-Date -Format o)"
+        $handle = [LpTtsProbe.Kernel32]::LoadLibraryExW($onnxRuntimeDll, [System.IntPtr]::Zero, 0)
+        $probeEnd = Get-Date
+        $elapsedMs = [int]($probeEnd - $probeStart).TotalMilliseconds
+        if ($handle -eq [System.IntPtr]::Zero) {
+            $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            Write-Host "[smoke] LoadLibraryExW FAILED elapsed_ms=$elapsedMs win32_error=$err"
+        } else {
+            Write-Host "[smoke] LoadLibraryExW OK elapsed_ms=$elapsedMs handle=$handle"
+            [void][LpTtsProbe.Kernel32]::FreeLibrary($handle)
+        }
+    } catch {
+        Write-Host "[smoke] LoadLibraryExW probe threw: $($_.Exception.Message)"
+    }
+
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $binaryPath
     $startInfo.ArgumentList.Add("--espeak-data-dir")
