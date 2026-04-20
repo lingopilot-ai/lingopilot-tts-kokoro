@@ -116,6 +116,12 @@ jobs:
         timeout-minutes: 10
         run: .\scripts\Verify-Readiness.ps1 -Packaged -SkipLiveTests -SkipPackagedSmoke
 
+      - name: Smoke test packaged archive
+        shell: pwsh
+        timeout-minutes: 15
+        continue-on-error: true
+        run: .\scripts\Test-WindowsReleaseArchive.ps1 -ZipPath "dist/lingopilot-tts-kokoro-${{ github.ref_name }}-${{ matrix.archive_suffix }}"
+
       - name: Install cargo-sbom
         shell: pwsh
         run: cargo install cargo-sbom --locked
@@ -127,6 +133,7 @@ jobs:
           cargo sbom --output-format spdx_json_2_3 | Out-File -FilePath "dist/lingopilot-tts-kokoro-${{ github.ref_name }}-sbom.spdx.json" -Encoding utf8
 
       - name: Publish GitHub Release assets
+        if: ${{ !contains(github.ref_name, '-rc') }}
         uses: softprops/action-gh-release@v2
         with:
           fail_on_unmatched_files: true
@@ -136,6 +143,7 @@ jobs:
             dist/lingopilot-tts-kokoro-${{ github.ref_name }}-sbom.spdx.json
 
       - name: Verify published release assets
+        if: ${{ !contains(github.ref_name, '-rc') }}
         shell: pwsh
         timeout-minutes: 5
         continue-on-error: true

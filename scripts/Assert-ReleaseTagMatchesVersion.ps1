@@ -24,8 +24,9 @@ if (-not $versionMatch) {
 $packageVersion = $versionMatch.Matches[0].Groups[1].Value
 $expectedTag = "v$packageVersion"
 
-if ($Tag -ne $expectedTag) {
-    throw "Release tag '$Tag' does not match Cargo.toml version '$packageVersion'. Expected '$expectedTag'."
+$rcTagPattern = "^$([regex]::Escape($expectedTag))-rc[-.A-Za-z0-9]*$"
+if ($Tag -ne $expectedTag -and $Tag -notmatch $rcTagPattern) {
+    throw "Release tag '$Tag' does not match Cargo.toml version '$packageVersion'. Expected '$expectedTag' or '$expectedTag-rc*'."
 }
 
 Write-Host "Validated release tag $Tag against Cargo.toml version $packageVersion." -ForegroundColor Green
