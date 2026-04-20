@@ -6,6 +6,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Invoke-NativeCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Step,
+        [Parameter(Mandatory = $true, ValueFromRemainingArguments = $true)]
+        [string[]]$Arguments
+    )
+
+    & $Arguments[0] @($Arguments[1..($Arguments.Length - 1)])
+    if ($LASTEXITCODE -ne 0) {
+        throw "[Verify-Readiness] step=$Step failed: '$($Arguments -join ' ')' exited with code $LASTEXITCODE."
+    }
+}
+
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $readmePath = Join-Path $repoRoot "README.md"
 $stagedRuntimeDir = Join-Path $repoRoot "target\release\espeak-runtime"
@@ -150,10 +164,10 @@ try {
     .\scripts\Assert-ForbiddenCargoLockCrates.ps1
 
     Write-Host "[Verify-Readiness] step=cargo-check" -ForegroundColor Cyan
-    cargo check --locked
+    Invoke-NativeCommand -Step "cargo-check" cargo check --locked
 
     Write-Host "[Verify-Readiness] step=cargo-test" -ForegroundColor Cyan
-    cargo test --locked
+    Invoke-NativeCommand -Step "cargo-test" cargo test --locked
 
     if (-not $SkipLiveTests) {
         Write-Host "[Verify-Readiness] step=live-assets-lookup" -ForegroundColor Cyan
@@ -163,7 +177,7 @@ try {
             $env:KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR = $liveAssets.RuntimeDir
             $env:KOKORO_TTS_LIVE_MODEL_DIR = $liveAssets.ModelDir
             $env:KOKORO_TTS_LIVE_ONNXRUNTIME_DLL = $liveAssets.OnnxRuntimeDll
-            cargo test --locked -- --ignored --test-threads=1
+            Invoke-NativeCommand -Step "cargo-test-ignored" cargo test --locked -- --ignored --test-threads=1
         }
     }
 

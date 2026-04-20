@@ -203,7 +203,6 @@ impl SynthesisCache {
 
         let voice_id = assets.voice.voice_id.clone();
         let chunk_count = phoneme_chunks.len();
-        tracing::info!(event = "sentinel_A_pre_runtime_mut_call");
         let runtime = self.runtime_mut(assets)?;
         let mut samples = Vec::new();
 
@@ -231,7 +230,6 @@ impl SynthesisCache {
         &mut self,
         assets: &ResolvedModelAssets,
     ) -> Result<&mut (dyn KokoroRuntime + '_), String> {
-        tracing::info!(event = "sentinel_B_runtime_mut_entered");
         let key = RuntimeKey::from_assets(assets);
         if !self.runtimes.contains_key(&key) {
             tracing::debug!(
@@ -239,7 +237,6 @@ impl SynthesisCache {
                 model_path = assets.model_path.display().to_string(),
                 voices_path = assets.voices_path.display().to_string()
             );
-            tracing::info!(event = "sentinel_C_pre_runtime_factory_load");
             let load_start = Instant::now();
             let runtime = self.runtime_factory.load(assets)?;
             let load_elapsed = load_start.elapsed();
@@ -580,9 +577,7 @@ impl OrtKokoroRuntime {
         assets: &ResolvedModelAssets,
         execution_provider: ExecutionProvider,
     ) -> Result<Self, String> {
-        tracing::info!(event = "sentinel_L1_pre_ensure_onnxruntime");
         ensure_onnxruntime_loaded()?;
-        tracing::info!(event = "sentinel_L2_post_ensure_onnxruntime");
 
         // NO silent fallback to CPU on DirectML registration failure: per
         // `AGENTS.md §10.2`, DirectML errors surface to the host through the
@@ -590,9 +585,14 @@ impl OrtKokoroRuntime {
         let providers = match execution_provider {
             ExecutionProvider::Cpu => vec![ep::CPU::default().build()],
             ExecutionProvider::DirectMl => {
-                return Err(
-                    "DirectML execution provider is disabled in this build (diagnostic isolation). Use --execution-provider cpu.".to_string()
-                );
+                #[cfg(target_os = "windows")]
+                {
+                    vec![ep::DirectML::default().build()]
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    unreachable!("directml rejected at startup on non-Windows");
+                }
             }
         };
         let ep_label = match execution_provider {
@@ -600,19 +600,14 @@ impl OrtKokoroRuntime {
             ExecutionProvider::DirectMl => "DirectML",
         };
 
-        tracing::info!(event = "sentinel_L3_pre_session_builder");
-        let mut session_builder = Session::builder()
+        let session = Session::builder()
             .map_err(|error| format!("Cannot create ONNX Runtime session builder: {error}"))?
             .with_optimization_level(GraphOptimizationLevel::Level1)
             .map_err(|error| format!("Cannot set optimization level: {error}"))?
             .with_execution_providers(providers)
             .map_err(|error| {
                 format!("Cannot configure Kokoro {ep_label} execution provider: {error}")
-            })?;
-        tracing::info!(event = "sentinel_L4_post_with_execution_providers");
-
-        tracing::info!(event = "sentinel_L5_pre_commit_from_file");
-        let session = session_builder
+            })?
             .commit_from_file(&assets.model_path)
             .map_err(|error| {
                 format!(
@@ -621,12 +616,9 @@ impl OrtKokoroRuntime {
                     error
                 )
             })?;
-        tracing::info!(event = "sentinel_L6_post_commit_from_file");
 
         let input_config = RuntimeInputConfig::from_session(&session)?;
-        tracing::info!(event = "sentinel_L7_post_input_config");
         let voice_styles = load_voice_styles(&assets.voices_path)?;
-        tracing::info!(event = "sentinel_L8_post_load_voice_styles");
 
         tracing::debug!(
             event = "kokoro_runtime_loaded",
@@ -1302,21 +1294,16 @@ fn detect_speed_input_kind(input: &ort::value::Outlet) -> Result<SpeedInputKind,
 
 fn ensure_onnxruntime_loaded() -> Result<(), String> {
     let result = ONNXRUNTIME_INIT.get_or_init(|| {
-        tracing::info!(event = "sentinel_E1_pre_resolve_library_path");
         let library_path = resolve_onnxruntime_library_path()?;
-        tracing::info!(event = "sentinel_E2_post_resolve_library_path", library_path = %library_path.display());
-        tracing::info!(event = "sentinel_E3_pre_ort_init_from");
-        let init = ort::init_from(&library_path)
+        ort::init_from(&library_path)
             .map_err(|error| {
                 format!(
                     "Cannot initialize ONNX Runtime from '{}': {}",
                     library_path.display(),
                     error
                 )
-            })?;
-        tracing::info!(event = "sentinel_E4_pre_commit");
-        init.commit();
-        tracing::info!(event = "sentinel_E5_post_commit");
+            })?
+            .commit();
         Ok(())
     });
 

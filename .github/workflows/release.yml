@@ -111,17 +111,6 @@ jobs:
         shell: pwsh
         run: '& "${{ matrix.package_script }}" -Version "${{ github.ref_name }}"'
 
-      - name: ORT init probe (isolated)
-        shell: pwsh
-        timeout-minutes: 3
-        continue-on-error: true
-        run: |
-          $dll = Join-Path (Resolve-Path ".").Path "packaging\windows\onnxruntime.dll"
-          Write-Host "[probe-step] dll=$dll exists=$(Test-Path $dll)"
-          Write-Host "[probe-step] starting ort-init-probe at $(Get-Date -Format o)"
-          & "target\release\ort-init-probe.exe" "$dll"
-          Write-Host "[probe-step] exit_code=$LASTEXITCODE at $(Get-Date -Format o)"
-
       - name: Run packaged readiness verification
         shell: pwsh
         timeout-minutes: 10
@@ -130,7 +119,6 @@ jobs:
       - name: Smoke test packaged archive
         shell: pwsh
         timeout-minutes: 5
-        continue-on-error: true
         run: .\scripts\Test-WindowsReleaseArchive.ps1 -ZipPath "dist/lingopilot-tts-kokoro-${{ github.ref_name }}-${{ matrix.archive_suffix }}"
 
       - name: Emit sibling .zip.sha256
@@ -177,5 +165,4 @@ jobs:
         if: ${{ !contains(github.ref_name, '-rc') }}
         shell: pwsh
         timeout-minutes: 5
-        continue-on-error: true
         run: .\scripts\Test-PublishedRelease.ps1 -Version "${{ github.ref_name }}" -Repository "${{ github.repository }}"

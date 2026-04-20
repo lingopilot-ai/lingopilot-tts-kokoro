@@ -11,10 +11,6 @@ authors = ["LingoPilot Labs", "Paulo Corcino"]
 name = "lingopilot-tts-kokoro"
 path = "src/main.rs"
 
-[[bin]]
-name = "ort-init-probe"
-path = "src/bin/ort_init_probe.rs"
-
 [features]
 default = []
 kokoro-g2p-onnx = []
@@ -30,7 +26,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["api-24", "load-dynamic", "ndarray", "std"] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["api-24", "load-dynamic", "ndarray", "std", "directml"] }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 ort = { version = "2.0.0-rc.12", default-features = false, features = ["api-24", "load-dynamic", "ndarray", "std"] }
