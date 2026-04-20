@@ -1307,16 +1307,21 @@ fn detect_speed_input_kind(input: &ort::value::Outlet) -> Result<SpeedInputKind,
 
 fn ensure_onnxruntime_loaded() -> Result<(), String> {
     let result = ONNXRUNTIME_INIT.get_or_init(|| {
+        tracing::info!(event = "sentinel_E1_pre_resolve_library_path");
         let library_path = resolve_onnxruntime_library_path()?;
-        ort::init_from(&library_path)
+        tracing::info!(event = "sentinel_E2_post_resolve_library_path", library_path = %library_path.display());
+        tracing::info!(event = "sentinel_E3_pre_ort_init_from");
+        let init = ort::init_from(&library_path)
             .map_err(|error| {
                 format!(
                     "Cannot initialize ONNX Runtime from '{}': {}",
                     library_path.display(),
                     error
                 )
-            })?
-            .commit();
+            })?;
+        tracing::info!(event = "sentinel_E4_pre_commit");
+        init.commit();
+        tracing::info!(event = "sentinel_E5_post_commit");
         Ok(())
     });
 
