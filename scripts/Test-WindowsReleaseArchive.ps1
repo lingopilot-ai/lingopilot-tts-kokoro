@@ -179,18 +179,8 @@ try {
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
 
-    $stderrBuffer = [System.Text.StringBuilder]::new()
-    $stderrEvent = Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -MessageData $stderrBuffer -Action {
-        param($senderObj, $e)
-        $line = $e.Data
-        if ($null -ne $line) {
-            [System.Console]::Error.WriteLine("[sidecar-stderr] $line")
-            [void]$Event.MessageData.AppendLine($line)
-        }
-    }
-
     $null = $process.Start()
-    $process.BeginErrorReadLine()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
     $stdout = $process.StandardOutput.BaseStream
 
     Write-Host "[smoke] process started (pid=$($process.Id)), awaiting ready line..."
@@ -246,10 +236,12 @@ try {
     $process.StandardInput.Close()
     $process.WaitForExit()
     $remainingStdout = Read-RemainingBytes -Stream $stdout
-    $process.CancelErrorRead()
-    Unregister-Event -SourceIdentifier $stderrEvent.Name
-    Remove-Job -Job $stderrEvent -Force
-    $stderrText = $stderrBuffer.ToString()
+    $stderrText = $stderrTask.GetAwaiter().GetResult()
+    foreach ($stderrLine in ($stderrText -split "`r?`n")) {
+        if (-not [string]::IsNullOrEmpty($stderrLine)) {
+            Write-Host "[sidecar-stderr] $stderrLine"
+        }
+    }
 
     if ($process.ExitCode -ne 0) {
         throw "Smoke test failed: packaged binary exited with code $($process.ExitCode). stderr: $stderrText"
