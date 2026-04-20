@@ -1,5 +1,13 @@
+use std::ffi::CStr;
+use std::os::raw::{c_char, c_void};
 use std::path::PathBuf;
 use std::time::Instant;
+
+#[repr(C)]
+struct OrtApiBase {
+    get_api: unsafe extern "C" fn(u32) -> *const c_void,
+    get_version_string: unsafe extern "C" fn() -> *const c_char,
+}
 
 fn ts() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,7 +48,7 @@ fn main() {
 
     let t1 = Instant::now();
     log("pre_get_symbol_OrtGetApiBase", "");
-    let sym: Result<libloading::Symbol<unsafe extern "C" fn() -> *const core::ffi::c_void>, _> =
+    let sym: Result<libloading::Symbol<unsafe extern "C" fn() -> *const OrtApiBase>, _> =
         unsafe { lib.get(b"OrtGetApiBase\0") };
     match &sym {
         Ok(_) => log(
@@ -66,6 +74,42 @@ fn main() {
             base_ptr.is_null()
         ),
     );
+    if base_ptr.is_null() {
+        std::process::exit(13);
+    }
+    let base: &OrtApiBase = unsafe { &*base_ptr };
+
+    let t_v = Instant::now();
+    log("pre_GetVersionString", "");
+    let vptr = unsafe { (base.get_version_string)() };
+    let version_str = if vptr.is_null() {
+        "<null>".to_string()
+    } else {
+        unsafe { CStr::from_ptr(vptr).to_string_lossy().into_owned() }
+    };
+    log(
+        "post_GetVersionString",
+        &format!(
+            "elapsed_ms={} version=\"{}\"",
+            t_v.elapsed().as_millis(),
+            version_str
+        ),
+    );
+
+    for api_ver in [24u32, 23, 22, 21, 20, 18, 16] {
+        let t_a = Instant::now();
+        log("pre_GetApi", &format!("api_version={}", api_ver));
+        let api_ptr = unsafe { (base.get_api)(api_ver) };
+        log(
+            "post_GetApi",
+            &format!(
+                "elapsed_ms={} api_version={} ptr_null={}",
+                t_a.elapsed().as_millis(),
+                api_ver,
+                api_ptr.is_null()
+            ),
+        );
+    }
 
     drop(lib);
 
