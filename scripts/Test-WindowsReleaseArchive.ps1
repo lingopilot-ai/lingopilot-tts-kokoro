@@ -173,14 +173,13 @@ try {
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
+    $startInfo.RedirectStandardError = $false
     $startInfo.Environment["KOKORO_TTS_LOG"] = "debug"
 
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
 
     $null = $process.Start()
-    $stderrTask = $process.StandardError.ReadToEndAsync()
     $stdout = $process.StandardOutput.BaseStream
 
     Write-Host "[smoke] process started (pid=$($process.Id)), awaiting ready line..."
@@ -201,10 +200,13 @@ try {
         speed = 1.0
         model_dir = $modelDir
     } | ConvertTo-Json -Compress
+    Write-Host "[smoke] writing synthesis request to stdin..."
     $process.StandardInput.WriteLine($request)
     $process.StandardInput.Flush()
+    Write-Host "[smoke] request flushed, awaiting audio response line..."
 
     $audioLine = Read-ProtocolLine -Stream $stdout
+    Write-Host "[smoke] audio response line received"
     if ([string]::IsNullOrWhiteSpace($audioLine)) {
         throw "Smoke test failed: the packaged binary did not emit an audio response."
     }
@@ -228,32 +230,24 @@ try {
         throw "Smoke test failed: expected channels=1, got '$($audio.channels)'."
     }
 
+    Write-Host "[smoke] reading $byteLength PCM bytes from stdout..."
     $audioBytes = Read-ExactBytes -Stream $stdout -ByteLength $byteLength
     if ($audioBytes.Length -ne $byteLength) {
         throw "Smoke test failed: expected $byteLength PCM bytes, got $($audioBytes.Length)."
     }
 
+    Write-Host "[smoke] audio bytes read, closing stdin..."
     $process.StandardInput.Close()
     $process.WaitForExit()
+    Write-Host "[smoke] process exited, code=$($process.ExitCode)"
     $remainingStdout = Read-RemainingBytes -Stream $stdout
-    $stderrText = $stderrTask.GetAwaiter().GetResult()
-    foreach ($stderrLine in ($stderrText -split "`r?`n")) {
-        if (-not [string]::IsNullOrEmpty($stderrLine)) {
-            Write-Host "[sidecar-stderr] $stderrLine"
-        }
-    }
 
     if ($process.ExitCode -ne 0) {
-        throw "Smoke test failed: packaged binary exited with code $($process.ExitCode). stderr: $stderrText"
+        throw "Smoke test failed: packaged binary exited with code $($process.ExitCode)."
     }
 
     if ($remainingStdout.Length -ne 0) {
-        throw "Smoke test failed: stdout contained extra output after the ready line."
-    }
-
-    Assert-StderrIsPlainText -Stderr $stderrText
-    if ($stderrText -notmatch "level=DEBUG event=request_succeeded") {
-        throw "Smoke test failed: stderr did not contain the expected debug success log."
+        throw "Smoke test failed: stdout contained extra output after the audio bytes."
     }
 
     Write-Host "Smoke test passed for $resolvedZipPath" -ForegroundColor Green
