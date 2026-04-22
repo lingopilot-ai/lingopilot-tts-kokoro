@@ -14,4 +14,4 @@ AGENTS.md
 BACKLOG.md
 sidecar_stderr.txt
 sidecar_stdout.bin
-packaging/windows/kokoro-model/
+packaging/windows/kokoro-model/pre-release-local.log

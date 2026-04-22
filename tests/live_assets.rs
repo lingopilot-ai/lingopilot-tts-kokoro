@@ -1,11 +1,15 @@
 #[path = "../src/live_test_support.rs"]
 mod live_test_support;
+#[path = "support/fingerprint.rs"]
+mod fingerprint;
 #[path = "support/sidecar.rs"]
 mod sidecar;
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use live_test_support::LiveTestAssets;
 use serde_json::json;
@@ -98,6 +102,130 @@ fn live_invalid_voice_returns_payload_error_with_real_bundle() {
         .as_str()
         .unwrap()
         .contains("Unsupported Kokoro voice"));
+}
+
+fn write_wav_pcm16le_mono_24k(path: &Path, pcm: &[u8]) {
+    let sample_rate: u32 = 24_000;
+    let channels: u16 = 1;
+    let bits: u16 = 16;
+    let data_len = pcm.len() as u32;
+    let byte_rate = sample_rate * channels as u32 * (bits as u32 / 8);
+    let block_align = channels * (bits / 8);
+
+    let mut f = fs::File::create(path).expect("wav file");
+    f.write_all(b"RIFF").unwrap();
+    f.write_all(&(36 + data_len).to_le_bytes()).unwrap();
+    f.write_all(b"WAVEfmt ").unwrap();
+    f.write_all(&16u32.to_le_bytes()).unwrap();
+    f.write_all(&1u16.to_le_bytes()).unwrap();
+    f.write_all(&channels.to_le_bytes()).unwrap();
+    f.write_all(&sample_rate.to_le_bytes()).unwrap();
+    f.write_all(&byte_rate.to_le_bytes()).unwrap();
+    f.write_all(&block_align.to_le_bytes()).unwrap();
+    f.write_all(&bits.to_le_bytes()).unwrap();
+    f.write_all(b"data").unwrap();
+    f.write_all(&data_len.to_le_bytes()).unwrap();
+    f.write_all(pcm).unwrap();
+}
+
+fn play_wav_blocking(path: &Path) {
+    #[cfg(windows)]
+    {
+        let status = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "(New-Object Media.SoundPlayer '{}').PlaySync()",
+                    path.display()
+                ),
+            ])
+            .status()
+            .expect("powershell should be available");
+        assert!(status.success(), "playback failed");
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("aplay").arg(path).status();
+    }
+}
+
+const FINGERPRINT_FIXTURE: &str = "tests/fixtures/af_heart_hello.json";
+const FINGERPRINT_TEXT: &str = "Hello from Kokoro";
+const FINGERPRINT_VOICE: &str = "af_heart";
+const FINGERPRINT_REQUEST_DEADLINE: Duration = Duration::from_secs(45);
+
+fn read_audio_pcm_with_deadline(sidecar: &mut SidecarHarness) -> Vec<u8> {
+    let guard = sidecar.arm_deadline(FINGERPRINT_REQUEST_DEADLINE);
+    let audio = sidecar.read_json_line();
+    assert_eq!(audio["op"], "audio");
+    let byte_length = audio["bytes"].as_u64().expect("bytes field") as usize;
+    assert!(byte_length > 0 && byte_length % 2 == 0);
+    let bytes = sidecar.read_exact_stdout_bytes(byte_length);
+    let done = sidecar.read_json_line();
+    assert_eq!(done["op"], "done");
+    assert_eq!(done["id"], audio["id"]);
+    guard.cancel();
+    bytes
+}
+
+#[test]
+#[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
+fn live_english_af_heart_fingerprint() {
+    let live_assets = LiveTestAssets::from_env();
+    let mut sidecar = spawn_ready_sidecar(&live_assets, None);
+
+    sidecar.send_json(request_for(
+        FINGERPRINT_TEXT,
+        FINGERPRINT_VOICE,
+        &live_assets.model_dir,
+    ));
+
+    let pcm = read_audio_pcm_with_deadline(&mut sidecar);
+    let actual = fingerprint::compute(&pcm);
+
+    if std::env::var("KOKORO_TTS_PLAY_FINGERPRINT").map(|v| v == "1").unwrap_or(false) {
+        let wav_path = std::env::temp_dir().join("lingopilot-tts-kokoro-fingerprint.wav");
+        write_wav_pcm16le_mono_24k(&wav_path, &pcm);
+        eprintln!("▶ playing {}", wav_path.display());
+        play_wav_blocking(&wav_path);
+    }
+
+    let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(FINGERPRINT_FIXTURE);
+    let update_mode = std::env::var("KOKORO_TTS_UPDATE_FINGERPRINT")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    match fingerprint::load_baseline(&fixture_path) {
+        Some(baseline) if !update_mode => {
+            fingerprint::assert_within(&actual, &baseline);
+            eprintln!(
+                "fingerprint OK: bytes={} rms={:.4} zcr={:.4}",
+                actual.byte_length, actual.mean_rms, actual.mean_zcr
+            );
+        }
+        _ => {
+            let baseline = fingerprint::Baseline {
+                fingerprint: actual.clone(),
+                byte_length_tol: 0.10,
+                rms_tol: 0.15,
+                zcr_tol: 0.10,
+                notes: format!(
+                    "af_heart voice, text={FINGERPRINT_TEXT:?}. Regenerate with \
+                     KOKORO_TTS_UPDATE_FINGERPRINT=1 when model/ORT changes are intentional."
+                ),
+            };
+            fingerprint::write_baseline(&fixture_path, &baseline);
+            panic!(
+                "Fingerprint baseline written to {}. Re-run without \
+                 KOKORO_TTS_UPDATE_FINGERPRINT=1 to verify. Computed: bytes={} rms={:.4} zcr={:.4}",
+                fixture_path.display(),
+                actual.byte_length,
+                actual.mean_rms,
+                actual.mean_zcr
+            );
+        }
+    }
 }
 
 #[test]

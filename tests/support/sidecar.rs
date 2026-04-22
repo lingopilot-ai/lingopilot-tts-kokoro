@@ -2,10 +2,56 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
-use std::thread;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
+
+/// Kill a child process by PID cross-platform. Used as the watchdog's last
+/// resort so a blocked read in the test thread can unwind instead of hanging.
+fn kill_pid(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+pub struct DeadlineGuard {
+    cancelled: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl DeadlineGuard {
+    pub fn cancel(mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for DeadlineGuard {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
 
 const PRIMARY_LOG_ENV: &str = "KOKORO_TTS_LOG";
 const LEGACY_LOG_ENV: &str = "LINGOPILOT_TTS_LOG";
@@ -13,7 +59,30 @@ const LEGACY_LOG_ENV: &str = "LINGOPILOT_TTS_LOG";
 pub struct SidecarHarness {
     child: Child,
     stdout: BufReader<ChildStdout>,
-    stderr: BufReader<ChildStderr>,
+    stderr_buf: Arc<Mutex<String>>,
+    stderr_thread: Option<JoinHandle<()>>,
+}
+
+fn spawn_stderr_drain(stderr: ChildStderr) -> (Arc<Mutex<String>>, JoinHandle<()>) {
+    let buf = Arc::new(Mutex::new(String::new()));
+    let thread_buf = buf.clone();
+    let handle = thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if let Ok(mut guard) = thread_buf.lock() {
+                        guard.push_str(&line);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    (buf, handle)
 }
 
 impl SidecarHarness {
@@ -48,12 +117,51 @@ impl SidecarHarness {
 
         let stdout = child.stdout.take().expect("stdout should be piped");
         let stderr = child.stderr.take().expect("stderr should be piped");
+        let (stderr_buf, stderr_thread) = spawn_stderr_drain(stderr);
 
         Self {
             child,
             stdout: BufReader::new(stdout),
-            stderr: BufReader::new(stderr),
+            stderr_buf,
+            stderr_thread: Some(stderr_thread),
         }
+    }
+
+    /// Arm a watchdog that kills the sidecar process if `timeout` elapses
+    /// before the guard is cancelled or dropped. Without this, a hung read
+    /// on stdout would block the test thread indefinitely (see 054d160
+    /// regression post-mortem).
+    pub fn arm_deadline(&self, timeout: Duration) -> DeadlineGuard {
+        let pid = self.child.id();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let thread_cancelled = cancelled.clone();
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + timeout;
+            while Instant::now() < deadline {
+                if thread_cancelled.load(Ordering::Relaxed) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            if !thread_cancelled.load(Ordering::Relaxed) {
+                eprintln!(
+                    "[sidecar-watchdog] killing pid={pid} after {:?} deadline",
+                    timeout
+                );
+                kill_pid(pid);
+            }
+        });
+        DeadlineGuard {
+            cancelled,
+            handle: Some(handle),
+        }
+    }
+
+    pub fn stderr_snapshot(&self) -> String {
+        self.stderr_buf
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     pub fn send_json(&mut self, value: Value) {
@@ -105,12 +213,10 @@ impl SidecarHarness {
     pub fn shutdown_and_collect_stderr(&mut self) -> String {
         self.close_stdin();
         let _ = self.child.wait();
-
-        let mut stderr = String::new();
-        self.stderr
-            .read_to_string(&mut stderr)
-            .expect("stderr should be readable");
-        stderr
+        if let Some(handle) = self.stderr_thread.take() {
+            let _ = handle.join();
+        }
+        self.stderr_snapshot()
     }
 
     #[allow(dead_code)]
@@ -134,6 +240,9 @@ impl Drop for SidecarHarness {
     fn drop(&mut self) {
         self.close_stdin();
         let _ = self.child.wait();
+        if let Some(handle) = self.stderr_thread.take() {
+            let _ = handle.join();
+        }
     }
 }
 

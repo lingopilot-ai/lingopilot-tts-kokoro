@@ -31,8 +31,11 @@ url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.4/onnxru
 sha256 = "93787795f47e1eee369182e43ed51b9e5da0878ab0346aecf4258979b8bba989"
 
 [piper_windows]
-# Leave url empty to derive from the current tag:
-#   https://github.com/lingopilot-ai/lingopilot-tts-piper/releases/download/vX.Y.Z/lingopilot-tts-piper-vX.Y.Z-windows-x86_64.zip
-# Override with KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL when needed.
-url = ""
-sha256 = ""
+# This URL is historically named "piper_windows" but in practice points to the
+# kokoro-hosted espeak-runtime zip (contains espeak-ng.dll + espeak-ng-data).
+# Upstream piper release zips do NOT ship the DLL, so the kokoro-hosted bundle
+# is the canonical source for the Windows eSpeak runtime. Pinned so CI and
+# local runs resolve identically. Override with
+# KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL when needed.
+url = "https://github.com/lingopilot-ai/lingopilot-tts-kokoro/releases/download/kokoro-model-assets-v1.0/espeak-runtime.zip"
+sha256 = "5f2105d5deaf6dc0690d819cbc93d204e4f644ebbcd9d16f913d814c8d4d2e05"

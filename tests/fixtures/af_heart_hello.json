@@ -1,0 +1,11 @@
+{
+  "fingerprint": {
+    "byte_length": 87600,
+    "mean_rms": 0.04243249911053176,
+    "mean_zcr": 0.09846846846846842
+  },
+  "byte_length_tol": 0.1,
+  "rms_tol": 0.15,
+  "zcr_tol": 0.1,
+  "notes": "af_heart voice, text=\"Hello from Kokoro\". Regenerate with KOKORO_TTS_UPDATE_FINGERPRINT=1 when model/ORT changes are intentional."
+}

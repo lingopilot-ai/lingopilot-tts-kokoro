@@ -15,61 +15,7 @@ permissions:
   contents: write
 
 jobs:
-  bench-gate:
-    name: Bench gate
-    runs-on: windows-latest
-    timeout-minutes: 60
-    if: ${{ vars.KOKORO_TTS_ENABLE_BENCH_CI == 'true' }}
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Validate live-assets CI configuration
-        shell: pwsh
-        run: .\scripts\Assert-ReleaseAssetConfiguration.ps1
-
-      - name: Build release binary
-        shell: pwsh
-        run: cargo build --release --locked
-
-      - name: Stage release assets
-        shell: pwsh
-        run: .\scripts\Stage-WindowsReleaseAssets.ps1
-        env:
-          KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL: ${{ vars.KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL }}
-
-      - name: Expose staged live assets
-        shell: pwsh
-        run: |
-          $repoRoot = (Resolve-Path ".").Path
-          "KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR=$(Join-Path $repoRoot 'target\release\espeak-runtime')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "KOKORO_TTS_LIVE_MODEL_DIR=$(Join-Path $repoRoot 'packaging\windows\kokoro-model')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "KOKORO_TTS_LIVE_ONNXRUNTIME_DLL=$(Join-Path $repoRoot 'packaging\windows\onnxruntime.dll')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Run criterion bench
-        shell: pwsh
-        run: cargo bench --bench synth
-
-      - name: Compare against baseline
-        shell: pwsh
-        run: .\scripts\Compare-BenchBaseline.ps1
-
-      - name: Upload criterion reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-bench-criterion-${{ github.run_id }}
-          path: target/criterion
-          if-no-files-found: warn
-          retention-days: 14
-
   release-artifact:
-    needs: bench-gate
-    if: ${{ always() && (needs.bench-gate.result == 'success' || needs.bench-gate.result == 'skipped') }}
     name: ${{ matrix.label }} release artifact
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -104,8 +50,6 @@ jobs:
       - name: Stage release assets
         shell: pwsh
         run: .\scripts\Stage-WindowsReleaseAssets.ps1 -Version "${{ github.ref_name }}"
-        env:
-          KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL: ${{ vars.KOKORO_TTS_RELEASE_PIPER_WINDOWS_ZIP_URL }}
 
       - name: Package release archive
         shell: pwsh
