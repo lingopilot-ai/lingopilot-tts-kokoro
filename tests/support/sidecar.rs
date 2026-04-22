@@ -283,13 +283,15 @@ pub fn assert_stderr_is_plain_text(stderr: &str) {
 
 #[allow(dead_code)]
 pub fn unique_missing_path(prefix: &str) -> PathBuf {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock should be after epoch")
         .as_nanos();
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     std::env::temp_dir().join(format!(
-        "lingopilot-tts-kokoro-{prefix}-{}-{nonce}",
+        "lingopilot-tts-kokoro-{prefix}-{}-{nonce}-{seq}",
         std::process::id()
     ))
 }
@@ -315,13 +317,15 @@ pub struct TempDir {
 #[allow(dead_code)]
 impl TempDir {
     pub fn new(prefix: &str) -> Self {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be after epoch")
             .as_nanos();
+        let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let path = std::env::temp_dir().join(format!(
-            "lingopilot-tts-kokoro-{prefix}-{}-{nonce}",
+            "lingopilot-tts-kokoro-{prefix}-{}-{nonce}-{seq}",
             std::process::id()
         ));
         fs::create_dir(&path).expect("temp dir should be created");
