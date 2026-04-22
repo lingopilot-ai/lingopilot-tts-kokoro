@@ -19,17 +19,18 @@ use lingopilot_tts_kokoro::synthesis::phonemize_for_test;
 // correct. Each value is the `PhonemeResult.phonemes` field.
 // ---------------------------------------------------------------------------
 
-// Task 4.4: These are placeholder values. Run the tests once on a stable runner
-// with `cargo test --locked -- --ignored phonemizer_espeak_backcompat` to
-// capture the real baseline, then replace these consts.
-const GOLDEN_AF_HEART: &str = "<<CAPTURE_BASELINE>>";
-const GOLDEN_BF_EMMA: &str = "<<CAPTURE_BASELINE>>";
-const GOLDEN_EF_DORA: &str = "<<CAPTURE_BASELINE>>";
-const GOLDEN_FF_SIWIS: &str = "<<CAPTURE_BASELINE>>";
-const GOLDEN_HF_ALPHA: &str = "<<CAPTURE_BASELINE>>";
-const GOLDEN_IF_SARA: &str = "<<CAPTURE_BASELINE>>";
-const GOLDEN_PF_DORA: &str = "<<CAPTURE_BASELINE>>";
-const GOLDEN_PM_SANTA: &str = "<<CAPTURE_BASELINE>>";
+// Baselines captured from release run 24779170648 (v0.1.3 tag, windows-latest,
+// eSpeak runtime staged by Stage-WindowsReleaseAssets.ps1). Regenerate only
+// after a deliberate eSpeak/phoneme-pipeline change by re-running the test
+// once and pasting the string from the panic message.
+const GOLDEN_AF_HEART: &str = "ðə kwˈɪk bɹˈaʊn fˈɑks dʒˈʌmps ˌoʊvəɹ ðə lˈAɪzi dˈɑɡ";
+const GOLDEN_BF_EMMA: &str = "ðə kwˈɪk bɹˈaʊn fˈɒks dʒˈʌmps ˌəʊvə ðə lˈAɪzi dˈɒɡ";
+const GOLDEN_EF_DORA: &str = "el βelˈoθ θˈoro marˈon sˈalta sˌoβɾe el pˈero pˌeɾeθˈoso";
+const GOLDEN_FF_SIWIS: &str = "lə ʁənˈaʁ bʁˈœ\u{303} ʁapˈid sˈot paʁdəsˈy lə ʃjˈɛ\u{303} paʁɛsˈø";
+const GOLDEN_HF_ALPHA: &str = "(en)nˈamast(hi) (en)ˈɑːdʒ kˈɑː dˈɪn bˈahʌt ɐkhˈa hˈaɪ(hi)";
+const GOLDEN_IF_SARA: &str = "la vˈolpe marɾˈone velˈotʃe sˈalta sˈopra il kˈane pˈiɡro";
+const GOLDEN_PF_DORA: &str = "a xˈapidæ xˌapˈozæ maxˈoŋ pˈulæ sˈobri ʊ kˌaʃˈoxʊ prˌeɡisˈozʊ";
+const GOLDEN_PM_SANTA: &str = "a xˈapidæ xˌapˈozæ maxˈoŋ pˈulæ sˈobri ʊ kˌaʃˈoxʊ prˌeɡisˈozʊ";
 
 // ---------------------------------------------------------------------------
 // Canonical sentences (one per language).
