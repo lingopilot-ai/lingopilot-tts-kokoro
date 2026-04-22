@@ -177,7 +177,7 @@ try {
             $env:KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR = $liveAssets.RuntimeDir
             $env:KOKORO_TTS_LIVE_MODEL_DIR = $liveAssets.ModelDir
             $env:KOKORO_TTS_LIVE_ONNXRUNTIME_DLL = $liveAssets.OnnxRuntimeDll
-            Invoke-NativeCommand -Step "cargo-test-ignored" cargo test --locked -- --ignored --test-threads=1
+            Invoke-NativeCommand -Step "cargo-test-ignored" -Arguments @('cargo','test','--locked','--','--ignored','--test-threads=1')
         }
     }
 
