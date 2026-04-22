@@ -78,8 +78,9 @@ fn play_wav(path: &Path) {
 }
 
 fn spawn_ready_sidecar(live_assets: &LiveTestAssets) -> SidecarHarness {
-    let mut sidecar = SidecarHarness::spawn_with_runtime_and_env(
+    let mut sidecar = SidecarHarness::spawn_with_dirs_and_env(
         &live_assets.espeak_runtime_dir,
+        Some(&live_assets.model_dir),
         None,
         &[(
             "ORT_DYLIB_PATH",
@@ -90,7 +91,7 @@ fn spawn_ready_sidecar(live_assets: &LiveTestAssets) -> SidecarHarness {
         )],
     );
     let ready = sidecar.read_json_line();
-    assert_eq!(ready["type"], "ready");
+    assert_eq!(ready["op"], "ready");
     sidecar
 }
 
@@ -110,13 +111,16 @@ fn play_all_languages() {
         sidecar.send_json(request_for(text, voice, &live_assets.model_dir));
 
         let audio = sidecar.read_json_line();
-        assert_eq!(audio["type"], "audio", "expected audio response for {voice}, got: {audio}");
+        assert_eq!(audio["op"], "audio", "expected audio response for {voice}, got: {audio}");
 
-        let byte_length = audio["byte_length"]
+        let byte_length = audio["bytes"]
             .as_u64()
-            .expect("byte_length should be present") as usize;
+            .expect("bytes should be present") as usize;
 
         let pcm_bytes = sidecar.read_exact_stdout_bytes(byte_length);
+        let done = sidecar.read_json_line();
+        assert_eq!(done["op"], "done");
+
         let wav_path = out_dir.join(format!("{voice}_{lang}.wav"));
         write_wav(&wav_path, &pcm_bytes);
 

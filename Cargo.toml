@@ -1,6 +1,6 @@
 [package]
 name = "lingopilot-tts-kokoro"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "A local TTS sidecar scaffold that preserves the JSON/PCM wire protocol while migrating from Piper to Kokoro."
 license = "Apache-2.0"

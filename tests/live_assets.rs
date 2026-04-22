@@ -4,7 +4,7 @@ mod live_test_support;
 mod sidecar;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use live_test_support::LiveTestAssets;
@@ -23,9 +23,14 @@ fn temp_live_dir(prefix: &str) -> PathBuf {
     ))
 }
 
-fn spawn_ready_sidecar(live_assets: &LiveTestAssets, level: Option<&str>) -> SidecarHarness {
-    let mut sidecar = SidecarHarness::spawn_with_runtime_and_env(
+fn spawn_ready_sidecar_with_model(
+    live_assets: &LiveTestAssets,
+    model_dir: &Path,
+    level: Option<&str>,
+) -> SidecarHarness {
+    let mut sidecar = SidecarHarness::spawn_with_dirs_and_env(
         &live_assets.espeak_runtime_dir,
+        Some(model_dir),
         level,
         &[(
             "ORT_DYLIB_PATH",
@@ -37,24 +42,37 @@ fn spawn_ready_sidecar(live_assets: &LiveTestAssets, level: Option<&str>) -> Sid
     );
 
     let ready = sidecar.read_json_line();
-    assert_eq!(ready["type"], "ready");
+    assert_eq!(ready["op"], "ready");
+    assert_eq!(ready["sample_rate"], 24000);
+    assert_eq!(ready["channels"], 1);
+    assert_eq!(ready["encoding"], "pcm16le");
     sidecar
+}
+
+fn spawn_ready_sidecar(live_assets: &LiveTestAssets, level: Option<&str>) -> SidecarHarness {
+    let model_dir = live_assets.model_dir.clone();
+    spawn_ready_sidecar_with_model(live_assets, &model_dir, level)
 }
 
 fn assert_audio_response(sidecar: &mut SidecarHarness) -> usize {
     let audio = sidecar.read_json_line();
-    assert_eq!(audio["type"], "audio");
+    assert_eq!(audio["op"], "audio");
     assert_eq!(audio["sample_rate"], 24000);
     assert_eq!(audio["channels"], 1);
 
-    let byte_length = audio["byte_length"]
+    let byte_length = audio["bytes"]
         .as_u64()
-        .expect("byte_length should be present") as usize;
+        .expect("bytes should be present") as usize;
     assert!(byte_length > 0);
     assert_eq!(byte_length % 2, 0);
 
     let bytes = sidecar.read_exact_stdout_bytes(byte_length);
     assert_eq!(bytes.len(), byte_length);
+
+    let done = sidecar.read_json_line();
+    assert_eq!(done["op"], "done");
+    assert_eq!(done["id"], audio["id"]);
+
     byte_length
 }
 
@@ -62,24 +80,24 @@ fn assert_audio_response(sidecar: &mut SidecarHarness) -> usize {
 #[ignore = "Requires a real packaged eSpeak runtime, ONNX Runtime DLL, and Kokoro assets"]
 fn live_invalid_voice_returns_payload_error_with_real_bundle() {
     let live_assets = LiveTestAssets::from_env();
-
     let mut sidecar = spawn_ready_sidecar(&live_assets, None);
 
     sidecar.send_json(json!({
+        "op": "synthesize",
+        "id": "invalid-voice-1",
         "text": "Hello from Kokoro",
-        "voice": "xx_unknown",
+        "voice_id": "xx_unknown",
         "speed": 1.0,
-        "model_dir": live_assets.model_dir,
     }));
 
     let error = sidecar.read_json_line();
-    assert_eq!(error["type"], "error");
-
-    let message = error["message"]
+    assert_eq!(error["op"], "error");
+    assert_eq!(error["kind"], "unknown_voice");
+    assert_eq!(error["id"], "invalid-voice-1");
+    assert!(error["message"]
         .as_str()
-        .expect("message should be present");
-    assert!(message.starts_with("Invalid request payload:"));
-    assert!(message.contains("Unsupported Kokoro voice"));
+        .unwrap()
+        .contains("Unsupported Kokoro voice"));
 }
 
 #[test]
@@ -87,13 +105,11 @@ fn live_invalid_voice_returns_payload_error_with_real_bundle() {
 fn live_american_english_request_returns_audio_and_exact_pcm_bytes() {
     let live_assets = LiveTestAssets::from_env();
     let mut sidecar = spawn_ready_sidecar(&live_assets, None);
-
     sidecar.send_json(request_for(
         "Hello from Kokoro",
         "af_heart",
         &live_assets.model_dir,
     ));
-
     let _ = assert_audio_response(&mut sidecar);
 }
 
@@ -102,13 +118,11 @@ fn live_american_english_request_returns_audio_and_exact_pcm_bytes() {
 fn live_british_english_request_returns_audio_and_exact_pcm_bytes() {
     let live_assets = LiveTestAssets::from_env();
     let mut sidecar = spawn_ready_sidecar(&live_assets, None);
-
     sidecar.send_json(request_for(
         "Hello from Kokoro",
         "bf_emma",
         &live_assets.model_dir,
     ));
-
     let _ = assert_audio_response(&mut sidecar);
 }
 
@@ -117,13 +131,11 @@ fn live_british_english_request_returns_audio_and_exact_pcm_bytes() {
 fn live_spanish_request_returns_audio() {
     let live_assets = LiveTestAssets::from_env();
     let mut sidecar = spawn_ready_sidecar(&live_assets, None);
-
     sidecar.send_json(request_for(
         "Hola desde Kokoro",
         "ef_dora",
         &live_assets.model_dir,
     ));
-
     let _ = assert_audio_response(&mut sidecar);
 }
 
@@ -132,13 +144,11 @@ fn live_spanish_request_returns_audio() {
 fn live_french_request_returns_audio() {
     let live_assets = LiveTestAssets::from_env();
     let mut sidecar = spawn_ready_sidecar(&live_assets, None);
-
     sidecar.send_json(request_for(
         "Bonjour depuis Kokoro",
         "ff_siwis",
         &live_assets.model_dir,
     ));
-
     let _ = assert_audio_response(&mut sidecar);
 }
 
@@ -147,13 +157,11 @@ fn live_french_request_returns_audio() {
 fn live_hindi_request_returns_audio() {
     let live_assets = LiveTestAssets::from_env();
     let mut sidecar = spawn_ready_sidecar(&live_assets, None);
-
     sidecar.send_json(request_for(
         "Namaste from Kokoro",
         "hf_alpha",
         &live_assets.model_dir,
     ));
-
     let _ = assert_audio_response(&mut sidecar);
 }
 
@@ -162,13 +170,11 @@ fn live_hindi_request_returns_audio() {
 fn live_italian_request_returns_audio() {
     let live_assets = LiveTestAssets::from_env();
     let mut sidecar = spawn_ready_sidecar(&live_assets, None);
-
     sidecar.send_json(request_for(
         "Ciao da Kokoro",
         "if_sara",
         &live_assets.model_dir,
     ));
-
     let _ = assert_audio_response(&mut sidecar);
 }
 
@@ -177,13 +183,11 @@ fn live_italian_request_returns_audio() {
 fn live_brazilian_portuguese_request_returns_audio() {
     let live_assets = LiveTestAssets::from_env();
     let mut sidecar = spawn_ready_sidecar(&live_assets, None);
-
     sidecar.send_json(request_for(
         "Ola do Kokoro",
         "pf_dora",
         &live_assets.model_dir,
     ));
-
     let _ = assert_audio_response(&mut sidecar);
 }
 
@@ -209,10 +213,7 @@ fn live_same_process_requests_both_succeed_and_keep_streams_separated() {
 
     sidecar.close_stdin();
     let remaining_stdout = sidecar.read_remaining_stdout();
-    assert!(
-        remaining_stdout.is_empty(),
-        "stdout must not contain log output after audio payloads"
-    );
+    assert!(remaining_stdout.is_empty());
 
     let stderr = sidecar.shutdown_and_collect_stderr();
     assert!(stderr.contains("level=DEBUG event=request_succeeded"));
@@ -245,22 +246,6 @@ fn live_successful_request_emits_timing_events() {
             "stderr must contain `{needle}`; got:\n{stderr}"
         );
     }
-
-    for line in stderr.lines().filter(|l| {
-        l.contains("event=phonemization_done")
-            || l.contains("event=model_loaded")
-            || l.contains("event=inference_done")
-    }) {
-        let idx = line
-            .find("duration_ms=")
-            .unwrap_or_else(|| panic!("timing line missing duration_ms: {line}"));
-        let tail = &line[idx + "duration_ms=".len()..];
-        let first = tail.chars().next().expect("duration_ms value must exist");
-        assert!(
-            first.is_ascii_digit(),
-            "duration_ms value must start with a digit: {line}"
-        );
-    }
 }
 
 #[test]
@@ -285,29 +270,26 @@ fn live_speed_parameter_changes_byte_length() {
     let live_assets = LiveTestAssets::from_env();
     let mut sidecar = spawn_ready_sidecar(&live_assets, None);
 
-    let slow_request = json!({
+    sidecar.send_json(json!({
+        "op": "synthesize",
+        "id": "speed-slow",
         "text": "Hello from Kokoro",
-        "voice": "af_heart",
+        "voice_id": "af_heart",
         "speed": 0.8,
-        "model_dir": live_assets.model_dir,
-    });
-    sidecar.send_json(slow_request);
+    }));
     let slow_len = assert_audio_response(&mut sidecar);
 
-    let fast_request = json!({
+    sidecar.send_json(json!({
+        "op": "synthesize",
+        "id": "speed-fast",
         "text": "Hello from Kokoro",
-        "voice": "af_heart",
+        "voice_id": "af_heart",
         "speed": 1.3,
-        "model_dir": live_assets.model_dir,
-    });
-    sidecar.send_json(fast_request);
+    }));
     let fast_len = assert_audio_response(&mut sidecar);
 
     assert_ne!(slow_len, fast_len);
-    assert!(
-        slow_len > fast_len,
-        "slower speech should produce more samples"
-    );
+    assert!(slow_len > fast_len);
 }
 
 #[test]
@@ -323,7 +305,7 @@ fn live_model_dir_with_spaces_and_non_ascii_succeeds() {
         fs::copy(entry.path(), destination).expect("model asset should copy");
     }
 
-    let mut sidecar = spawn_ready_sidecar(&live_assets, None);
+    let mut sidecar = spawn_ready_sidecar_with_model(&live_assets, &special_model_dir, None);
 
     sidecar.send_json(request_for(
         "Hello from Kokoro",

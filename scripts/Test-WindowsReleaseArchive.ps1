@@ -115,7 +115,15 @@ function Assert-StderrIsPlainText {
     }
 
     if ($Stderr.Contains('{"type"')) {
+        throw "Smoke test failed: stderr contained legacy protocol JSON."
+    }
+
+    if ($Stderr.Contains('{"op"')) {
         throw "Smoke test failed: stderr contained protocol JSON."
+    }
+
+    if ($Stderr.Contains("Missing required startup argument")) {
+        throw "Smoke test failed: stderr contained forbidden 'Missing required startup argument' string."
     }
 }
 
@@ -168,8 +176,8 @@ try {
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $binaryPath
-    $startInfo.ArgumentList.Add("--espeak-data-dir")
-    $startInfo.ArgumentList.Add($runtimeDir)
+    # Zero CLI args: exercise the directive's auto-discovery code path
+    # (espeak-runtime/ and kokoro-model/ resolved relative to the exe).
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardOutput = $true
@@ -190,15 +198,26 @@ try {
     }
 
     $ready = $readyLine | ConvertFrom-Json
-    if ($ready.type -ne "ready") {
+    if ($ready.op -ne "ready") {
         throw "Smoke test failed: expected a ready response, got '$readyLine'."
     }
+    if ([int]$ready.sample_rate -ne 24000) {
+        throw "Smoke test failed: ready.sample_rate != 24000 (got '$($ready.sample_rate)')."
+    }
+    if ([int]$ready.channels -ne 1) {
+        throw "Smoke test failed: ready.channels != 1 (got '$($ready.channels)')."
+    }
+    if ($ready.encoding -ne "pcm16le") {
+        throw "Smoke test failed: ready.encoding != 'pcm16le' (got '$($ready.encoding)')."
+    }
 
+    $requestId = "smoke-1"
     $request = @{
+        op = "synthesize"
+        id = $requestId
         text = "Hello from the packaged Kokoro sidecar"
-        voice = "af_heart"
+        voice_id = "af_heart"
         speed = 1.0
-        model_dir = $modelDir
     } | ConvertTo-Json -Compress
     Write-Host "[smoke] writing synthesis request to stdin..."
     $process.StandardInput.WriteLine($request)
@@ -212,16 +231,19 @@ try {
     }
 
     $audio = $audioLine | ConvertFrom-Json
-    if ($audio.type -ne "audio") {
+    if ($audio.op -ne "audio") {
         throw "Smoke test failed: expected an audio response, got '$audioLine'."
     }
+    if ($audio.id -ne $requestId) {
+        throw "Smoke test failed: audio.id '$($audio.id)' did not echo request id '$requestId'."
+    }
 
-    $byteLength = [int]$audio.byte_length
+    $byteLength = [int]$audio.bytes
     if ($byteLength -le 0) {
-        throw "Smoke test failed: byte_length must be greater than zero."
+        throw "Smoke test failed: bytes must be greater than zero."
     }
     if (($byteLength % 2) -ne 0) {
-        throw "Smoke test failed: byte_length must be even for PCM16 mono output."
+        throw "Smoke test failed: bytes must be even for PCM16 mono output."
     }
     if ([int]$audio.sample_rate -ne 24000) {
         throw "Smoke test failed: expected sample_rate=24000, got '$($audio.sample_rate)'."
@@ -236,7 +258,20 @@ try {
         throw "Smoke test failed: expected $byteLength PCM bytes, got $($audioBytes.Length)."
     }
 
-    Write-Host "[smoke] audio bytes read, closing stdin..."
+    Write-Host "[smoke] audio bytes read, awaiting done line..."
+    $doneLine = Read-ProtocolLine -Stream $stdout
+    if ([string]::IsNullOrWhiteSpace($doneLine)) {
+        throw "Smoke test failed: the packaged binary did not emit a done line."
+    }
+    $done = $doneLine | ConvertFrom-Json
+    if ($done.op -ne "done") {
+        throw "Smoke test failed: expected a done response, got '$doneLine'."
+    }
+    if ($done.id -ne $requestId) {
+        throw "Smoke test failed: done.id '$($done.id)' did not echo request id '$requestId'."
+    }
+
+    Write-Host "[smoke] done received, closing stdin..."
     $process.StandardInput.Close()
     $process.WaitForExit()
     Write-Host "[smoke] process exited, code=$($process.ExitCode)"
@@ -247,7 +282,7 @@ try {
     }
 
     if ($remainingStdout.Length -ne 0) {
-        throw "Smoke test failed: stdout contained extra output after the audio bytes."
+        throw "Smoke test failed: stdout contained extra output after the done line."
     }
 
     Write-Host "Smoke test passed for $resolvedZipPath" -ForegroundColor Green

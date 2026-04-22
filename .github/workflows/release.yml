@@ -116,6 +116,11 @@ jobs:
         timeout-minutes: 10
         run: .\scripts\Verify-Readiness.ps1 -Packaged -SkipLiveTests -SkipPackagedSmoke
 
+      - name: Directive smoke gate (zero-arg ready line)
+        shell: pwsh
+        timeout-minutes: 2
+        run: .\scripts\Test-ReleaseSmokeGate.ps1 -ZipPath "dist/lingopilot-tts-kokoro-${{ github.ref_name }}-${{ matrix.archive_suffix }}"
+
       - name: Smoke test packaged archive
         shell: pwsh
         timeout-minutes: 5

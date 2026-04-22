@@ -1,25 +1,27 @@
 use serde::{Deserialize, Serialize};
 
 const MAX_TEXT_CHARS: usize = 8192;
+const MAX_ID_BYTES: usize = 128;
 const MIN_SPEED: f32 = 0.5;
 const MAX_SPEED: f32 = 2.0;
 
 /// Request sent by the host process via stdin (one JSON object per line).
+///
+/// Tagged by the `op` discriminator per host contract (see main repo
+/// `docs/sidecar-directives/kokoro.md`). Reserved ops (`audio_chunk`,
+/// `cancel`) are NOT represented here — the dispatcher rejects them with
+/// `bad_request` before deserialization reaches this enum.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TtsRequest {
-    /// Text to synthesize.
-    pub text: String,
-
-    /// Kokoro voice ID (for example `af_heart` or `bf_emma`).
-    pub voice: String,
-
-    /// Playback speed multiplier (1.0 = normal).
-    #[serde(default = "default_speed")]
-    pub speed: f32,
-
-    /// Absolute path to a Kokoro asset bundle directory.
-    pub model_dir: String,
+#[serde(tag = "op")]
+pub enum TtsRequest {
+    #[serde(rename = "synthesize")]
+    Synthesize {
+        id: String,
+        text: String,
+        voice_id: String,
+        #[serde(default = "default_speed")]
+        speed: f32,
+    },
 }
 
 fn default_speed() -> f32 {
@@ -27,206 +29,238 @@ fn default_speed() -> f32 {
 }
 
 impl TtsRequest {
-    /// Validate request semantics after JSON deserialization succeeds.
     pub fn validate(&self) -> Result<(), String> {
-        if self.text.trim().is_empty() {
-            return Err("Invalid text: text must not be empty or whitespace".to_string());
+        match self {
+            TtsRequest::Synthesize {
+                id,
+                text,
+                voice_id,
+                speed,
+            } => {
+                if id.is_empty() {
+                    return Err("Invalid id: id must not be empty".to_string());
+                }
+                if id.len() > MAX_ID_BYTES {
+                    return Err(format!(
+                        "Invalid id: id must be at most {MAX_ID_BYTES} bytes"
+                    ));
+                }
+                if text.trim().is_empty() {
+                    return Err("Invalid text: text must not be empty or whitespace".to_string());
+                }
+                if text.chars().count() > MAX_TEXT_CHARS {
+                    return Err(format!(
+                        "Invalid text: text must be at most {MAX_TEXT_CHARS} characters"
+                    ));
+                }
+                if voice_id.trim().is_empty() {
+                    return Err(
+                        "Invalid voice_id: voice_id must not be empty or whitespace".to_string()
+                    );
+                }
+                if !speed.is_finite() || !(MIN_SPEED..=MAX_SPEED).contains(speed) {
+                    return Err(format!(
+                        "Invalid speed: speed must be a finite number between {MIN_SPEED} and {MAX_SPEED}"
+                    ));
+                }
+                Ok(())
+            }
         }
-
-        if self.text.chars().count() > MAX_TEXT_CHARS {
-            return Err(format!(
-                "Invalid text: text must be at most {MAX_TEXT_CHARS} characters"
-            ));
-        }
-
-        if self.voice.trim().is_empty() {
-            return Err("Invalid voice: voice must not be empty or whitespace".to_string());
-        }
-
-        if self.model_dir.trim().is_empty() {
-            return Err("Invalid model_dir: model_dir must not be empty or whitespace".to_string());
-        }
-
-        if !self.speed.is_finite() || !(MIN_SPEED..=MAX_SPEED).contains(&self.speed) {
-            return Err(format!(
-                "Invalid speed: speed must be a finite number between {MIN_SPEED} and {MAX_SPEED}"
-            ));
-        }
-
-        Ok(())
     }
+}
+
+/// Error kinds per host contract.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorKind {
+    BadRequest,
+    UnknownVoice,
+    SynthesisFailed,
+    #[allow(dead_code)]
+    Internal,
 }
 
 /// Response sent back to the host process via stdout.
 #[derive(Debug, Serialize)]
-#[serde(tag = "type")]
+#[serde(tag = "op")]
 pub enum TtsResponse {
-    /// Successful synthesis — audio follows as binary after this JSON line.
+    #[serde(rename = "ready")]
+    Ready {
+        version: String,
+        sample_rate: u32,
+        channels: u16,
+        encoding: &'static str,
+    },
+
     #[serde(rename = "audio")]
     Audio {
+        id: String,
         /// Number of PCM16 LE bytes that follow on stdout after the newline.
-        byte_length: u32,
-        /// Sample rate of the audio (for Kokoro ONNX, expected to be 24000).
+        bytes: u32,
         sample_rate: u32,
-        /// Number of audio channels (always 1 — mono).
         channels: u16,
     },
 
-    /// An error occurred during synthesis.
+    #[serde(rename = "done")]
+    Done { id: String },
+
     #[serde(rename = "error")]
     Error {
-        /// Human-readable error message.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        kind: ErrorKind,
         message: String,
-    },
-
-    /// Sidecar is ready to accept requests.
-    #[serde(rename = "ready")]
-    Ready {
-        /// Sidecar version string.
-        version: String,
     },
 }
 
 #[cfg(test)]
 mod tests {
-    use super::TtsRequest;
+    use super::{ErrorKind, TtsRequest, TtsResponse};
 
-    fn parse_request(text: &str, voice: &str, speed: f32, model_dir: &str) -> TtsRequest {
+    fn parse(id: &str, text: &str, voice_id: &str, speed: f32) -> TtsRequest {
         serde_json::from_str(&format!(
-            r#"{{
-                "text":{text:?},
-                "voice":{voice:?},
-                "speed":{speed},
-                "model_dir":{model_dir:?}
-            }}"#
+            r#"{{"op":"synthesize","id":{id:?},"text":{text:?},"voice_id":{voice_id:?},"speed":{speed}}}"#
         ))
         .expect("request should deserialize")
     }
 
     #[test]
-    fn request_deserializes_without_legacy_espeak_field() {
-        let request = r#"{
-            "text":"Hello",
-            "voice":"af_heart",
-            "speed":1.0,
-            "model_dir":"C:\\models\\kokoro-en"
-        }"#;
-
-        let parsed: TtsRequest = serde_json::from_str(request).expect("request should deserialize");
-
-        assert_eq!(parsed.text, "Hello");
-        assert_eq!(parsed.voice, "af_heart");
-        assert_eq!(parsed.speed, 1.0);
-        assert_eq!(parsed.model_dir, "C:\\models\\kokoro-en");
+    fn request_deserializes_synthesize_op() {
+        let r: TtsRequest = serde_json::from_str(
+            r#"{"op":"synthesize","id":"1","text":"Hi","voice_id":"af_heart","speed":1.0}"#,
+        )
+        .unwrap();
+        match r {
+            TtsRequest::Synthesize {
+                id,
+                text,
+                voice_id,
+                speed,
+            } => {
+                assert_eq!(id, "1");
+                assert_eq!(text, "Hi");
+                assert_eq!(voice_id, "af_heart");
+                assert_eq!(speed, 1.0);
+            }
+        }
     }
 
     #[test]
-    fn request_rejects_legacy_espeak_data_dir_as_unknown_field() {
-        let request = r#"{
-            "text":"Hello",
-            "voice":"af_heart",
-            "speed":1.0,
-            "model_dir":"C:\\models\\kokoro-en",
-            "espeak_data_dir":"C:\\runtime\\espeak-runtime"
-        }"#;
-
-        let error = serde_json::from_str::<TtsRequest>(request).expect_err("request should fail");
-        let message = error.to_string();
-
-        assert!(message.contains("unknown field `espeak_data_dir`"));
+    fn request_defaults_speed() {
+        let r: TtsRequest = serde_json::from_str(
+            r#"{"op":"synthesize","id":"1","text":"Hi","voice_id":"af_heart"}"#,
+        )
+        .unwrap();
+        match r {
+            TtsRequest::Synthesize { speed, .. } => assert_eq!(speed, 1.0),
+        }
     }
 
     #[test]
-    fn request_rejects_language_as_unknown_field() {
-        let request = r#"{
-            "text":"Hello",
-            "language":"en",
-            "voice":"af_heart",
-            "speed":1.0,
-            "model_dir":"C:\\models\\kokoro-en"
-        }"#;
-
-        let error = serde_json::from_str::<TtsRequest>(request).expect_err("request should fail");
-        let message = error.to_string();
-
-        assert!(message.contains("unknown field `language`"));
+    fn request_rejects_empty_id() {
+        let e = parse("", "Hi", "af_heart", 1.0).validate().unwrap_err();
+        assert!(e.contains("id must not be empty"));
     }
 
     #[test]
-    fn request_validation_rejects_empty_text() {
-        let error = parse_request("", "af_heart", 1.0, "C:\\models\\kokoro-en")
-            .validate()
-            .expect_err("empty text should fail");
-
-        assert!(error.contains("text must not be empty or whitespace"));
+    fn request_rejects_oversize_id() {
+        let long = "x".repeat(129);
+        let e = parse(&long, "Hi", "af_heart", 1.0).validate().unwrap_err();
+        assert!(e.contains("at most 128 bytes"));
     }
 
     #[test]
-    fn request_validation_rejects_empty_voice() {
-        let error = parse_request("Hello", "   ", 1.0, "C:\\models\\kokoro-en")
-            .validate()
-            .expect_err("empty voice should fail");
-
-        assert!(error.contains("voice must not be empty or whitespace"));
+    fn request_rejects_empty_text() {
+        let e = parse("1", "   ", "af_heart", 1.0).validate().unwrap_err();
+        assert!(e.contains("text must not be empty"));
     }
 
     #[test]
-    fn request_validation_rejects_empty_model_dir() {
-        let error = parse_request("Hello", "af_heart", 1.0, "   ")
-            .validate()
-            .expect_err("empty model_dir should fail");
-
-        assert!(error.contains("model_dir must not be empty or whitespace"));
+    fn request_rejects_empty_voice_id() {
+        let e = parse("1", "Hi", "   ", 1.0).validate().unwrap_err();
+        assert!(e.contains("voice_id must not be empty"));
     }
 
     #[test]
-    fn request_validation_accepts_text_at_max_length() {
-        let text = "a".repeat(8192);
-
-        parse_request(&text, "af_heart", 1.0, "C:\\models\\kokoro-en")
-            .validate()
-            .expect("text at limit should pass");
+    fn request_rejects_speed_below_range() {
+        let e = parse("1", "Hi", "af_heart", 0.49).validate().unwrap_err();
+        assert!(e.contains("between 0.5 and 2"));
     }
 
     #[test]
-    fn request_validation_rejects_text_above_max_length() {
-        let text = "a".repeat(8193);
-        let error = parse_request(&text, "af_heart", 1.0, "C:\\models\\kokoro-en")
-            .validate()
-            .expect_err("text above limit should fail");
-
-        assert!(error.contains("text must be at most 8192 characters"));
+    fn request_rejects_speed_above_range() {
+        let e = parse("1", "Hi", "af_heart", 2.01).validate().unwrap_err();
+        assert!(e.contains("between 0.5 and 2"));
     }
 
     #[test]
-    fn request_validation_accepts_speed_at_lower_bound() {
-        parse_request("Hello", "af_heart", 0.5, "C:\\models\\kokoro-en")
-            .validate()
-            .expect("lower speed bound should pass");
+    fn request_accepts_speed_at_bounds() {
+        parse("1", "Hi", "af_heart", 0.5).validate().unwrap();
+        parse("1", "Hi", "af_heart", 2.0).validate().unwrap();
     }
 
     #[test]
-    fn request_validation_accepts_speed_at_upper_bound() {
-        parse_request("Hello", "af_heart", 2.0, "C:\\models\\kokoro-en")
-            .validate()
-            .expect("upper speed bound should pass");
+    fn ready_serializes_with_op_tag() {
+        let json = serde_json::to_string(&TtsResponse::Ready {
+            version: "0.1.3".to_string(),
+            sample_rate: 24000,
+            channels: 1,
+            encoding: "pcm16le",
+        })
+        .unwrap();
+        assert!(json.contains(r#""op":"ready""#));
+        assert!(json.contains(r#""sample_rate":24000"#));
+        assert!(json.contains(r#""channels":1"#));
+        assert!(json.contains(r#""encoding":"pcm16le""#));
+        assert!(json.contains(r#""version":"0.1.3""#));
     }
 
     #[test]
-    fn request_validation_rejects_speed_below_lower_bound() {
-        let error = parse_request("Hello", "af_heart", 0.49, "C:\\models\\kokoro-en")
-            .validate()
-            .expect_err("speed below range should fail");
-
-        assert!(error.contains("speed must be a finite number between 0.5 and 2"));
+    fn audio_serializes_with_id_and_bytes() {
+        let json = serde_json::to_string(&TtsResponse::Audio {
+            id: "req-1".to_string(),
+            bytes: 48000,
+            sample_rate: 24000,
+            channels: 1,
+        })
+        .unwrap();
+        assert!(json.contains(r#""op":"audio""#));
+        assert!(json.contains(r#""id":"req-1""#));
+        assert!(json.contains(r#""bytes":48000"#));
     }
 
     #[test]
-    fn request_validation_rejects_speed_above_upper_bound() {
-        let error = parse_request("Hello", "af_heart", 2.01, "C:\\models\\kokoro-en")
-            .validate()
-            .expect_err("speed above range should fail");
+    fn done_serializes_with_id() {
+        let json = serde_json::to_string(&TtsResponse::Done {
+            id: "req-1".to_string(),
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"op":"done","id":"req-1"}"#);
+    }
 
-        assert!(error.contains("speed must be a finite number between 0.5 and 2"));
+    #[test]
+    fn error_with_id_serializes() {
+        let json = serde_json::to_string(&TtsResponse::Error {
+            id: Some("req-1".to_string()),
+            kind: ErrorKind::UnknownVoice,
+            message: "no such voice".to_string(),
+        })
+        .unwrap();
+        assert!(json.contains(r#""op":"error""#));
+        assert!(json.contains(r#""id":"req-1""#));
+        assert!(json.contains(r#""kind":"unknown_voice""#));
+        assert!(json.contains(r#""message":"no such voice""#));
+    }
+
+    #[test]
+    fn error_without_id_omits_field() {
+        let json = serde_json::to_string(&TtsResponse::Error {
+            id: None,
+            kind: ErrorKind::BadRequest,
+            message: "bad".to_string(),
+        })
+        .unwrap();
+        assert!(!json.contains(r#""id""#));
+        assert!(json.contains(r#""kind":"bad_request""#));
     }
 }

@@ -22,6 +22,15 @@ impl SidecarHarness {
         level: Option<&str>,
         extra_env: &[(&str, &str)],
     ) -> Self {
+        Self::spawn_with_dirs_and_env(runtime_dir, None, level, extra_env)
+    }
+
+    pub fn spawn_with_dirs_and_env(
+        runtime_dir: &Path,
+        model_dir: Option<&Path>,
+        level: Option<&str>,
+        extra_env: &[(&str, &str)],
+    ) -> Self {
         let mut command = sidecar_command();
         if let Some(level) = level {
             command.env(PRIMARY_LOG_ENV, level);
@@ -30,11 +39,12 @@ impl SidecarHarness {
             command.env(key, value);
         }
 
-        let mut child = command
-            .arg("--espeak-data-dir")
-            .arg(runtime_dir)
-            .spawn()
-            .expect("sidecar should start");
+        command.arg("--espeak-data-dir").arg(runtime_dir);
+        if let Some(model_dir) = model_dir {
+            command.arg("--model-dir").arg(model_dir);
+        }
+
+        let mut child = command.spawn().expect("sidecar should start");
 
         let stdout = child.stdout.take().expect("stdout should be piped");
         let stderr = child.stderr.take().expect("stderr should be piped");
@@ -127,20 +137,38 @@ impl Drop for SidecarHarness {
     }
 }
 
-pub fn request_for(text: &str, voice: &str, model_dir: &Path) -> Value {
+/// Build a synthesize-op request for the integration test harness.
+///
+/// Note: `_model_dir` is ignored on the wire (the sidecar now resolves its
+/// model dir at startup) but kept in the signature so callers can continue to
+/// pass asset paths without restructuring.
+pub fn request_for(text: &str, voice: &str, _model_dir: &Path) -> Value {
     json!({
+        "op": "synthesize",
+        "id": default_id(),
         "text": text,
-        "voice": voice,
+        "voice_id": voice,
         "speed": 1.0,
-        "model_dir": model_dir,
     })
+}
+
+fn default_id() -> String {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("req-{nonce}")
 }
 
 pub fn assert_stderr_is_plain_text(stderr: &str) {
     assert!(!stderr.contains('\0'), "stderr must not contain NUL bytes");
     assert!(
-        !stderr.contains("{\"type\""),
+        !stderr.contains("{\"op\""),
         "stderr must not contain protocol JSON"
+    );
+    assert!(
+        !stderr.contains("{\"type\""),
+        "stderr must not contain legacy protocol JSON"
     );
 }
 

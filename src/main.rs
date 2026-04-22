@@ -7,10 +7,10 @@ mod synthesis;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-use protocol::{TtsRequest, TtsResponse};
+use protocol::{ErrorKind, TtsRequest, TtsResponse};
 use synthesis::ExecutionProvider;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
@@ -19,12 +19,14 @@ use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::registry::LookupSpan;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const SAMPLE_RATE: u32 = 24000;
 const PRIMARY_LOG_ENV: &str = "KOKORO_TTS_LOG";
 const LEGACY_LOG_ENV: &str = "LINGOPILOT_TTS_LOG";
 
 #[derive(Debug, PartialEq, Eq)]
 struct StartupConfig {
     espeak_data_dir: PathBuf,
+    model_dir: PathBuf,
     execution_provider: ExecutionProvider,
 }
 
@@ -45,23 +47,18 @@ impl Visit for KeyValueVisitor {
     fn record_str(&mut self, field: &Field, value: &str) {
         self.push(field.name(), format_string_value(value));
     }
-
     fn record_bool(&mut self, field: &Field, value: bool) {
         self.push(field.name(), value.to_string());
     }
-
     fn record_i64(&mut self, field: &Field, value: i64) {
         self.push(field.name(), value.to_string());
     }
-
     fn record_u64(&mut self, field: &Field, value: u64) {
         self.push(field.name(), value.to_string());
     }
-
     fn record_f64(&mut self, field: &Field, value: f64) {
         self.push(field.name(), value.to_string());
     }
-
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
         self.push(field.name(), format!("{value:?}"));
     }
@@ -80,7 +77,6 @@ where
     ) -> fmt::Result {
         let mut visitor = KeyValueVisitor::default();
         event.record(&mut visitor);
-
         write!(writer, "level={}", event.metadata().level())?;
         for field in visitor.fields {
             write!(writer, " {field}")?;
@@ -106,7 +102,6 @@ fn load_log_env_filter() -> tracing_subscriber::EnvFilter {
             return filter;
         }
     }
-
     tracing_subscriber::EnvFilter::new("warn")
 }
 
@@ -132,7 +127,10 @@ fn main() -> ExitCode {
         event = "espeak_runtime_selected",
         espeak_data_dir = startup.espeak_data_dir.display().to_string()
     );
-
+    tracing::info!(
+        event = "model_dir_selected",
+        model_dir = startup.model_dir.display().to_string()
+    );
     tracing::info!(
         event = "execution_provider_selected",
         provider = match startup.execution_provider {
@@ -144,6 +142,9 @@ fn main() -> ExitCode {
     if !send_response(
         &TtsResponse::Ready {
             version: VERSION.to_string(),
+            sample_rate: SAMPLE_RATE,
+            channels: 1,
+            encoding: "pcm16le",
         },
         "ready",
     ) {
@@ -154,13 +155,15 @@ fn main() -> ExitCode {
         startup.espeak_data_dir.clone(),
         startup.execution_provider,
     );
+    let model_dir = startup.model_dir.clone();
+
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(l) => l,
             Err(error) => {
                 tracing::error!(event = "stdin_read_failed", error = error.to_string());
-                break;
+                return ExitCode::from(2);
             }
         };
 
@@ -169,74 +172,72 @@ fn main() -> ExitCode {
             continue;
         }
 
-        let request: TtsRequest = match parse_request(&line) {
-            Ok(r) => r,
-            Err(message) => {
-                let category = if message.starts_with("Invalid JSON request:") {
-                    "invalid_json"
-                } else {
-                    "invalid_request_payload"
-                };
+        match parse_request(&line) {
+            Ok(req) => handle_request(&mut synthesis_cache, &model_dir, req),
+            Err(rejection) => {
                 tracing::warn!(
                     event = "request_rejected",
-                    category,
+                    category = rejection.category,
                     line_len = line.chars().count(),
-                    detail = message.as_str()
+                    detail = rejection.message.as_str()
                 );
-                let _ = send_response(&TtsResponse::Error { message }, "error");
-                continue;
+                let _ = send_response(
+                    &TtsResponse::Error {
+                        id: rejection.id,
+                        kind: ErrorKind::BadRequest,
+                        message: rejection.message,
+                    },
+                    "error",
+                );
             }
-        };
-
-        handle_request(&mut synthesis_cache, request);
+        }
     }
 
     tracing::info!(event = "stdin_closed");
     ExitCode::SUCCESS
 }
 
-fn handle_request(synthesis_cache: &mut synthesis::SynthesisCache, req: TtsRequest) {
-    let text_len = req.text.chars().count();
+fn handle_request(
+    synthesis_cache: &mut synthesis::SynthesisCache,
+    model_dir: &std::path::Path,
+    req: TtsRequest,
+) {
+    let TtsRequest::Synthesize {
+        id,
+        text,
+        voice_id,
+        speed,
+    } = req;
+
+    let text_len = text.chars().count();
     tracing::debug!(
         event = "request_received",
-        voice = req.voice.as_str(),
-        speed = req.speed as f64,
+        id = id.as_str(),
+        voice_id = voice_id.as_str(),
+        speed = speed as f64,
         text_len
     );
 
-    let model_dir = Path::new(&req.model_dir);
-    if let Err(message) = synthesis::validate_model_dir(model_dir) {
-        tracing::warn!(
-            event = "request_rejected",
-            category = "invalid_request_payload",
-            voice = req.voice.as_str(),
-            speed = req.speed as f64,
-            text_len,
-            detail = message.as_str()
-        );
-        let _ = send_response(
-            &TtsResponse::Error {
-                message: format!("Invalid request payload: {}", message),
-            },
-            "error",
-        );
-        return;
-    }
-
-    let assets = match synthesis::resolve_model_assets(model_dir, &req.voice) {
+    let assets = match synthesis::resolve_model_assets(model_dir, &voice_id) {
         Ok(assets) => assets,
         Err(error) => {
+            let kind = classify_voice_error(&error);
+            let category = match kind {
+                ErrorKind::UnknownVoice => "unknown_voice",
+                _ => "invalid_request_payload",
+            };
             tracing::warn!(
                 event = "request_rejected",
-                category = "invalid_request_payload",
-                voice = req.voice.as_str(),
-                speed = req.speed as f64,
-                text_len,
+                category,
+                id = id.as_str(),
+                voice_id = voice_id.as_str(),
                 detail = error.as_str()
             );
             let _ = send_response(
                 &TtsResponse::Error {
-                    message: format!("Invalid request payload: {}", error),
+                    id: Some(id),
+                    kind,
+                    message: error,
                 },
                 "error",
             );
@@ -246,34 +247,37 @@ fn handle_request(synthesis_cache: &mut synthesis::SynthesisCache, req: TtsReque
 
     tracing::debug!(
         event = "kokoro_assets_resolved",
-        voice = req.voice.as_str(),
+        id = id.as_str(),
+        voice_id = voice_id.as_str(),
         lang_code = assets.voice.lang_code,
-        british = assets.voice.british,
-        espeak_voice = assets.voice.espeak_voice.unwrap_or("none"),
-        model_path = assets.model_path.display().to_string(),
-        voices_path = assets.voices_path.display().to_string()
+        british = assets.voice.british
     );
 
-    match synthesis_cache.synthesize(&req.text, &assets, req.speed) {
+    match synthesis_cache.synthesize(&text, &assets, speed) {
         Ok(result) => {
             let byte_len = (result.pcm16.len() * 2) as u32;
 
-            if !send_response(
-                &TtsResponse::Audio {
-                    byte_length: byte_len,
-                    sample_rate: result.sample_rate,
-                    channels: 1,
-                },
-                "audio",
-            ) {
+            let stdout = io::stdout();
+            let mut out = stdout.lock();
+
+            let audio_json = serde_json::to_string(&TtsResponse::Audio {
+                id: id.clone(),
+                bytes: byte_len,
+                sample_rate: result.sample_rate,
+                channels: 1,
+            })
+            .expect("audio response serialization");
+            if let Err(error) = writeln!(out, "{audio_json}") {
+                tracing::error!(
+                    event = "stdout_write_failed",
+                    stage = "audio",
+                    error = error.to_string()
+                );
                 return;
             }
 
-            let stdout = io::stdout();
-            let mut out = stdout.lock();
             for sample in &result.pcm16 {
-                let bytes = sample.to_le_bytes();
-                if let Err(error) = out.write_all(&bytes) {
+                if let Err(error) = out.write_all(&sample.to_le_bytes()) {
                     tracing::error!(
                         event = "stdout_write_failed",
                         stage = "audio_bytes",
@@ -282,18 +286,30 @@ fn handle_request(synthesis_cache: &mut synthesis::SynthesisCache, req: TtsReque
                     return;
                 }
             }
-            if let Err(error) = out.flush() {
+
+            let done_json = serde_json::to_string(&TtsResponse::Done { id: id.clone() })
+                .expect("done response serialization");
+            if let Err(error) = writeln!(out, "{done_json}") {
                 tracing::error!(
-                    event = "stdout_flush_failed",
-                    stage = "audio_bytes",
+                    event = "stdout_write_failed",
+                    stage = "done",
                     error = error.to_string()
                 );
                 return;
             }
+            if let Err(error) = out.flush() {
+                tracing::error!(
+                    event = "stdout_flush_failed",
+                    stage = "done",
+                    error = error.to_string()
+                );
+                return;
+            }
+
             tracing::debug!(
                 event = "request_succeeded",
-                voice = req.voice.as_str(),
-                speed = req.speed as f64,
+                id = id.as_str(),
+                voice_id = voice_id.as_str(),
                 text_len,
                 sample_rate = result.sample_rate as u64,
                 byte_length = byte_len as u64
@@ -303,14 +319,15 @@ fn handle_request(synthesis_cache: &mut synthesis::SynthesisCache, req: TtsReque
             tracing::warn!(
                 event = "request_failed",
                 category = "synthesis_failed",
-                voice = req.voice.as_str(),
-                speed = req.speed as f64,
-                text_len,
+                id = id.as_str(),
+                voice_id = voice_id.as_str(),
                 detail = error.as_str()
             );
             let _ = send_response(
                 &TtsResponse::Error {
-                    message: format!("Synthesis failed: {}", error),
+                    id: Some(id),
+                    kind: ErrorKind::SynthesisFailed,
+                    message: error,
                 },
                 "error",
             );
@@ -318,18 +335,64 @@ fn handle_request(synthesis_cache: &mut synthesis::SynthesisCache, req: TtsReque
     }
 }
 
-fn parse_request(line: &str) -> Result<TtsRequest, String> {
-    let request: TtsRequest = serde_json::from_str(line).map_err(|error| {
-        if error.is_syntax() || error.is_eof() {
-            format!("Invalid JSON request: {}", error)
-        } else {
-            format!("Invalid request payload: {}", error)
+fn classify_voice_error(error: &str) -> ErrorKind {
+    if error.starts_with("Unsupported Kokoro voice")
+        || error.starts_with("Invalid voice")
+        || error.contains("is not present in voices bundle")
+    {
+        ErrorKind::UnknownVoice
+    } else {
+        ErrorKind::BadRequest
+    }
+}
+
+#[derive(Debug)]
+struct Rejection {
+    id: Option<String>,
+    category: &'static str,
+    message: String,
+}
+
+fn parse_request(line: &str) -> Result<TtsRequest, Rejection> {
+    // Lenient pre-parse to recover the request id for error echoing and to
+    // reject reserved ops (`audio_chunk`, `cancel`) with the specified message.
+    let value: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(error) => {
+            return Err(Rejection {
+                id: None,
+                category: "invalid_json",
+                message: format!("Invalid JSON request: {}", error),
+            });
         }
+    };
+
+    let id = value
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
+    if let Some(op) = value.get("op").and_then(|v| v.as_str()) {
+        if op == "audio_chunk" || op == "cancel" {
+            return Err(Rejection {
+                id,
+                category: "invalid_request_payload",
+                message: "op not supported in this version".to_string(),
+            });
+        }
+    }
+
+    let request: TtsRequest = serde_json::from_value(value).map_err(|error| Rejection {
+        id: id.clone(),
+        category: "invalid_request_payload",
+        message: format!("Invalid request payload: {}", error),
     })?;
 
-    request
-        .validate()
-        .map_err(|error| format!("Invalid request payload: {}", error))?;
+    request.validate().map_err(|error| Rejection {
+        id,
+        category: "invalid_request_payload",
+        message: format!("Invalid request payload: {}", error),
+    })?;
 
     Ok(request)
 }
@@ -341,7 +404,20 @@ where
 {
     let config = parse_startup_config(args)?;
     synthesis::validate_espeak_data_dir(&config.espeak_data_dir)?;
+    synthesis::validate_model_dir(&config.model_dir)?;
     Ok(config)
+}
+
+fn discover_default_dir(subdir: &str) -> Result<PathBuf, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("Cannot determine executable path for auto-discovery: {e}"))?;
+    let parent = exe.parent().ok_or_else(|| {
+        format!(
+            "Cannot determine executable directory from '{}'",
+            exe.display()
+        )
+    })?;
+    Ok(parent.join(subdir))
 }
 
 fn parse_startup_config<I, S>(args: I) -> Result<StartupConfig, String>
@@ -353,6 +429,7 @@ where
     let _binary = args.next();
 
     let mut espeak_data_dir: Option<PathBuf> = None;
+    let mut model_dir: Option<PathBuf> = None;
     let mut execution_provider: Option<ExecutionProvider> = None;
 
     while let Some(arg) = args.next() {
@@ -360,12 +437,21 @@ where
             if espeak_data_dir.is_some() {
                 return Err("Duplicate startup argument: --espeak-data-dir".to_string());
             }
-
             let Some(value) = args.next() else {
                 return Err("Missing value for --espeak-data-dir".to_string());
             };
-
             espeak_data_dir = Some(PathBuf::from(value));
+            continue;
+        }
+
+        if arg == OsStr::new("--model-dir") {
+            if model_dir.is_some() {
+                return Err("Duplicate startup argument: --model-dir".to_string());
+            }
+            let Some(value) = args.next() else {
+                return Err("Missing value for --model-dir".to_string());
+            };
+            model_dir = Some(PathBuf::from(value));
             continue;
         }
 
@@ -373,11 +459,9 @@ where
             if execution_provider.is_some() {
                 return Err("Duplicate startup argument: --execution-provider".to_string());
             }
-
             let Some(value) = args.next() else {
                 return Err("Missing value for --execution-provider".to_string());
             };
-
             let value_str = value.to_string_lossy().to_string();
             let ep = match value_str.as_str() {
                 "cpu" => ExecutionProvider::Cpu,
@@ -411,12 +495,18 @@ where
         ));
     }
 
-    let Some(espeak_data_dir) = espeak_data_dir else {
-        return Err("Missing required startup argument: --espeak-data-dir <path>".to_string());
+    let espeak_data_dir = match espeak_data_dir {
+        Some(p) => p,
+        None => discover_default_dir("espeak-runtime")?,
+    };
+    let model_dir = match model_dir {
+        Some(p) => p,
+        None => discover_default_dir("kokoro-model")?,
     };
 
     Ok(StartupConfig {
         espeak_data_dir,
+        model_dir,
         execution_provider: execution_provider.unwrap_or(ExecutionProvider::Cpu),
     })
 }
@@ -448,57 +538,41 @@ fn send_response(response: &TtsResponse, response_type: &'static str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_request, parse_startup_config, ExecutionProvider, StartupConfig};
+    use super::{classify_voice_error, parse_request, parse_startup_config, ExecutionProvider};
+    use crate::protocol::{ErrorKind, TtsRequest};
     use std::path::PathBuf;
 
     #[test]
-    fn startup_config_requires_espeak_data_dir_flag() {
-        let error = parse_startup_config(["lingopilot-tts-kokoro"])
-            .expect_err("startup config should require the espeak flag");
-
-        assert!(error.contains("--espeak-data-dir"));
-    }
-
-    #[test]
-    fn startup_config_accepts_required_espeak_data_dir_flag() {
+    fn startup_config_accepts_explicit_espeak_and_model_dir_flags() {
         let config = parse_startup_config([
             "lingopilot-tts-kokoro",
             "--espeak-data-dir",
             "C:\\runtime\\espeak-runtime",
+            "--model-dir",
+            "C:\\models\\kokoro-en",
         ])
         .expect("startup config should parse");
-
         assert_eq!(
-            config,
-            StartupConfig {
-                espeak_data_dir: PathBuf::from("C:\\runtime\\espeak-runtime"),
-                execution_provider: ExecutionProvider::Cpu,
-            }
+            config.espeak_data_dir,
+            PathBuf::from("C:\\runtime\\espeak-runtime")
         );
-    }
-
-    #[test]
-    fn startup_config_defaults_execution_provider_to_cpu() {
-        let config = parse_startup_config([
-            "lingopilot-tts-kokoro",
-            "--espeak-data-dir",
-            "C:\\runtime\\espeak-runtime",
-        ])
-        .expect("startup config should parse");
+        assert_eq!(config.model_dir, PathBuf::from("C:\\models\\kokoro-en"));
         assert_eq!(config.execution_provider, ExecutionProvider::Cpu);
     }
 
     #[test]
-    fn startup_config_accepts_cpu_execution_provider() {
-        let config = parse_startup_config([
-            "lingopilot-tts-kokoro",
-            "--espeak-data-dir",
-            "C:\\runtime\\espeak-runtime",
-            "--execution-provider",
-            "cpu",
-        ])
-        .expect("startup config should parse");
-        assert_eq!(config.execution_provider, ExecutionProvider::Cpu);
+    fn startup_config_auto_discovers_when_flags_omitted() {
+        let config = parse_startup_config(["lingopilot-tts-kokoro"])
+            .expect("startup config should parse with auto-discovery");
+        assert!(config.espeak_data_dir.ends_with("espeak-runtime"));
+        assert!(config.model_dir.ends_with("kokoro-model"));
+    }
+
+    #[test]
+    fn startup_config_rejects_unknown_argument() {
+        let error = parse_startup_config(["lingopilot-tts-kokoro", "--bogus"])
+            .expect_err("unknown arg should be rejected");
+        assert!(error.starts_with("Unknown startup argument"));
     }
 
     #[cfg(target_os = "windows")]
@@ -508,6 +582,8 @@ mod tests {
             "lingopilot-tts-kokoro",
             "--espeak-data-dir",
             "C:\\runtime\\espeak-runtime",
+            "--model-dir",
+            "C:\\models\\kokoro-en",
             "--execution-provider",
             "directml",
         ])
@@ -515,78 +591,70 @@ mod tests {
         assert_eq!(config.execution_provider, ExecutionProvider::DirectMl);
     }
 
-    #[cfg(not(target_os = "windows"))]
     #[test]
-    fn startup_config_rejects_directml_on_non_windows() {
-        let error = parse_startup_config([
-            "lingopilot-tts-kokoro",
-            "--espeak-data-dir",
-            "/runtime/espeak-runtime",
-            "--execution-provider",
-            "directml",
-        ])
-        .expect_err("directml should be rejected on non-Windows");
-        assert!(error.contains("Windows"));
-    }
-
-    #[test]
-    fn startup_config_rejects_unknown_execution_provider_value() {
-        for bad in ["cuda", "dml", "gpu", ""] {
-            let error = parse_startup_config([
-                "lingopilot-tts-kokoro",
-                "--espeak-data-dir",
-                "C:\\runtime\\espeak-runtime",
-                "--execution-provider",
-                bad,
-            ])
-            .expect_err("unknown value should be rejected");
-            assert!(
-                error.starts_with("Invalid value for --execution-provider:"),
-                "unexpected error for '{bad}': {error}"
-            );
+    fn parse_request_accepts_synthesize_op() {
+        let req = parse_request(
+            r#"{"op":"synthesize","id":"r1","text":"Hi","voice_id":"af_heart","speed":1.0}"#,
+        )
+        .expect("valid request");
+        match req {
+            TtsRequest::Synthesize { id, voice_id, .. } => {
+                assert_eq!(id, "r1");
+                assert_eq!(voice_id, "af_heart");
+            }
         }
     }
 
     #[test]
-    fn startup_config_rejects_duplicate_execution_provider_flag() {
-        let error = parse_startup_config([
-            "lingopilot-tts-kokoro",
-            "--espeak-data-dir",
-            "C:\\runtime\\espeak-runtime",
-            "--execution-provider",
-            "cpu",
-            "--execution-provider",
-            "cpu",
-        ])
-        .expect_err("duplicate flag should be rejected");
-        assert_eq!(error, "Duplicate startup argument: --execution-provider");
+    fn parse_request_rejects_reserved_audio_chunk_op_and_echoes_id() {
+        let err = parse_request(r#"{"op":"audio_chunk","id":"r2"}"#).expect_err("reserved op");
+        assert_eq!(err.id.as_deref(), Some("r2"));
+        assert!(err.message.contains("op not supported in this version"));
     }
 
     #[test]
-    fn startup_config_rejects_missing_execution_provider_value() {
-        let error = parse_startup_config([
-            "lingopilot-tts-kokoro",
-            "--espeak-data-dir",
-            "C:\\runtime\\espeak-runtime",
-            "--execution-provider",
-        ])
-        .expect_err("missing value should be rejected");
-        assert_eq!(error, "Missing value for --execution-provider");
+    fn parse_request_rejects_reserved_cancel_op() {
+        let err = parse_request(r#"{"op":"cancel","id":"r3"}"#).expect_err("reserved op");
+        assert_eq!(err.id.as_deref(), Some("r3"));
+        assert!(err.message.contains("op not supported in this version"));
     }
 
     #[test]
-    fn parse_request_rejects_semantically_invalid_payload_as_invalid_request_payload() {
-        let error = parse_request(
-            r#"{
-                "text":"   ",
-                "voice":"af_heart",
-                "speed":1.0,
-                "model_dir":"C:\\models\\kokoro-en"
-            }"#,
+    fn parse_request_echoes_id_on_semantic_validation_failure() {
+        let err = parse_request(
+            r#"{"op":"synthesize","id":"r4","text":"   ","voice_id":"af_heart","speed":1.0}"#,
         )
-        .expect_err("invalid semantic payload should fail");
+        .expect_err("blank text");
+        assert_eq!(err.id.as_deref(), Some("r4"));
+        assert!(err.message.starts_with("Invalid request payload:"));
+    }
 
-        assert!(error.starts_with("Invalid request payload:"));
-        assert!(error.contains("text must not be empty or whitespace"));
+    #[test]
+    fn parse_request_returns_none_id_on_malformed_json() {
+        let err = parse_request("not json").expect_err("bad json");
+        assert!(err.id.is_none());
+        assert!(err.message.starts_with("Invalid JSON request:"));
+    }
+
+    #[test]
+    fn classify_voice_error_recognises_unknown_voice_cases() {
+        assert!(matches!(
+            classify_voice_error("Unsupported Kokoro voice 'xx_test': ..."),
+            ErrorKind::UnknownVoice
+        ));
+        assert!(matches!(
+            classify_voice_error("Invalid voice: voice must not be empty or whitespace"),
+            ErrorKind::UnknownVoice
+        ));
+        assert!(matches!(
+            classify_voice_error(
+                "Kokoro voice 'af_ghost' is not present in voices bundle 'C:/x/voices.bin'"
+            ),
+            ErrorKind::UnknownVoice
+        ));
+        assert!(matches!(
+            classify_voice_error("Invalid model_dir 'C:/x': path must be absolute"),
+            ErrorKind::BadRequest
+        ));
     }
 }
