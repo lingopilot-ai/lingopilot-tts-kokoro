@@ -53,6 +53,10 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Assert ORT pin parity with piper
+        shell: pwsh
+        run: ./scripts/Assert-OrtPinParity.ps1
+
       - name: Run Windows readiness verification
         if: matrix.os == 'windows-latest'
         shell: pwsh
