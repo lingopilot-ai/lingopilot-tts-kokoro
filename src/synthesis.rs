@@ -1620,6 +1620,7 @@ fn platform_espeak_library_name() -> &'static str {
 /// `lingopilot_tts_kokoro::synthesis::phonemize_for_test`.
 /// Not intended for production use.
 #[doc(hidden)]
+#[allow(dead_code)]
 pub fn phonemize_for_test(
     text: &str,
     voice_id: &str,
