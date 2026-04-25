@@ -12,7 +12,7 @@ const MAX_SPEED: f32 = 2.0;
 /// `cancel`) are NOT represented here — the dispatcher rejects them with
 /// `bad_request` before deserialization reaches this enum.
 #[derive(Debug, Deserialize)]
-#[serde(tag = "op")]
+#[serde(tag = "op", deny_unknown_fields)]
 pub enum TtsRequest {
     #[serde(rename = "synthesize")]
     Synthesize {
@@ -22,6 +22,8 @@ pub enum TtsRequest {
         #[serde(default = "default_speed")]
         speed: f32,
     },
+    #[serde(rename = "ping")]
+    Ping { id: String },
 }
 
 fn default_speed() -> f32 {
@@ -31,6 +33,17 @@ fn default_speed() -> f32 {
 impl TtsRequest {
     pub fn validate(&self) -> Result<(), String> {
         match self {
+            TtsRequest::Ping { id } => {
+                if id.is_empty() {
+                    return Err("id must not be empty".to_string());
+                }
+                if id.len() > MAX_ID_BYTES {
+                    return Err(format!(
+                        "id must be at most {MAX_ID_BYTES} bytes"
+                    ));
+                }
+                Ok(())
+            }
             TtsRequest::Synthesize {
                 id,
                 text,
@@ -111,6 +124,9 @@ pub enum TtsResponse {
         kind: ErrorKind,
         message: String,
     },
+
+    #[serde(rename = "pong")]
+    Pong { id: String },
 }
 
 #[cfg(test)]
@@ -142,6 +158,7 @@ mod tests {
                 assert_eq!(voice_id, "af_heart");
                 assert_eq!(speed, 1.0);
             }
+            _ => panic!("expected Synthesize variant"),
         }
     }
 
@@ -153,6 +170,7 @@ mod tests {
         .unwrap();
         match r {
             TtsRequest::Synthesize { speed, .. } => assert_eq!(speed, 1.0),
+            _ => panic!("expected Synthesize variant"),
         }
     }
 
@@ -262,5 +280,49 @@ mod tests {
         .unwrap();
         assert!(!json.contains(r#""id""#));
         assert!(json.contains(r#""kind":"bad_request""#));
+    }
+
+    // --- ping / pong tests (E-14, ADR §4.2) ---
+
+    #[test]
+    fn ping_request_deserializes() {
+        let r: TtsRequest = serde_json::from_str(r#"{"op":"ping","id":"h1"}"#)
+            .expect("ping should deserialize");
+        match r {
+            TtsRequest::Ping { id } => assert_eq!(id, "h1"),
+            _ => panic!("expected Ping variant"),
+        }
+    }
+
+    #[test]
+    fn ping_request_rejects_extra_fields() {
+        let err = serde_json::from_str::<TtsRequest>(r#"{"op":"ping","id":"h1","extra":1}"#)
+            .expect_err("extra field should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown field") || msg.contains("extra"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn ping_request_rejects_empty_id() {
+        let req = TtsRequest::Ping { id: String::new() };
+        let err = req.validate().expect_err("empty id should fail");
+        assert!(err.contains("id must not be empty"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn ping_request_rejects_oversize_id() {
+        let req = TtsRequest::Ping { id: "x".repeat(129) };
+        let err = req.validate().expect_err("129-byte id should fail");
+        assert!(err.contains("128 bytes"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn pong_response_serializes() {
+        let json = serde_json::to_string(&TtsResponse::Pong { id: "h1".to_string() })
+            .expect("pong should serialize");
+        assert_eq!(json, r#"{"op":"pong","id":"h1"}"#);
     }
 }
