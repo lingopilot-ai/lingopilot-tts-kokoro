@@ -2,21 +2,23 @@
 //
 // Tests 1 and 2 do not require kokoro model assets and run in CI.
 // Test 3 (`deferred_ping_proves_ordering_invariant`) is asset-dependent and
-// is marked `#[ignore]`. To run it manually with assets:
+// is marked `#[ignore]`. It runs automatically when Verify-Readiness.ps1
+// finds live assets (KOKORO_TTS_LIVE_* env vars). To run it manually:
 //
+//   KOKORO_TTS_LIVE_ESPEAK_RUNTIME_DIR=<path> \
+//   KOKORO_TTS_LIVE_MODEL_DIR=<path> \
+//   KOKORO_TTS_LIVE_ONNXRUNTIME_DLL=<path> \
 //   cargo test --test ping_contract deferred_ping_proves_ordering_invariant -- --ignored
-//
-// Ensure the following env vars are set when running the ignored test:
-//   KOKORO_MODEL_DIR   — path to a directory containing exactly one *.onnx model
-//   KOKORO_ESPEAK_DIR  — path to the espeak runtime dir (must contain espeak-ng-data/)
-//   ORT_DYLIB_PATH     — path to onnxruntime DLL/SO
 
+#[path = "../src/live_test_support.rs"]
+mod live_test_support;
 #[path = "support/sidecar.rs"]
 mod sidecar;
 
 use std::fs;
 use std::time::Duration;
 
+use live_test_support::LiveTestAssets;
 use serde_json::json;
 use sidecar::{SidecarHarness, TempDir};
 
@@ -119,34 +121,25 @@ fn ping_between_syntheses() {
 // the `done` JSON line. A ping sent while synthesis is running must be
 // deferred until after `done` is emitted.
 //
-// This test is marked `#[ignore]` because it requires real kokoro model
-// assets. To run it:
-//
-//   cargo test --test ping_contract deferred_ping_proves_ordering_invariant -- --ignored
-//
-// Required environment variables:
-//   KOKORO_MODEL_DIR   — path to dir with exactly one *.onnx model file
-//   KOKORO_ESPEAK_DIR  — path to espeak runtime dir (contains espeak-ng-data/)
-//   ORT_DYLIB_PATH     — path to onnxruntime DLL/SO
+// Marked `#[ignore]` — runs automatically via Verify-Readiness.ps1 when live
+// assets are present (KOKORO_TTS_LIVE_* env vars). To run manually, see the
+// file header comment.
 // ---------------------------------------------------------------------------
 #[test]
 #[ignore]
 fn deferred_ping_proves_ordering_invariant() {
-    let model_dir_env = std::env::var("KOKORO_MODEL_DIR")
-        .expect("KOKORO_MODEL_DIR must be set to run this test");
-    let espeak_dir_env = std::env::var("KOKORO_ESPEAK_DIR")
-        .expect("KOKORO_ESPEAK_DIR must be set to run this test");
-    let ort_dylib = std::env::var("ORT_DYLIB_PATH")
-        .expect("ORT_DYLIB_PATH must be set to run this test");
+    let live_assets = LiveTestAssets::from_env();
 
-    let model_dir = std::path::PathBuf::from(&model_dir_env);
-    let espeak_dir = std::path::PathBuf::from(&espeak_dir_env);
+    let ort_dylib = live_assets
+        .onnxruntime_dll
+        .to_str()
+        .expect("onnxruntime dll path should be utf-8");
 
     let mut sidecar = SidecarHarness::spawn_with_dirs_and_env(
-        &espeak_dir,
-        Some(&model_dir),
+        &live_assets.espeak_runtime_dir,
+        Some(&live_assets.model_dir),
         None,
-        &[("ORT_DYLIB_PATH", &ort_dylib)],
+        &[("ORT_DYLIB_PATH", ort_dylib)],
     );
 
     let guard = sidecar.arm_deadline(Duration::from_secs(60));
