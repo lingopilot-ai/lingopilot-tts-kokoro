@@ -202,135 +202,142 @@ fn handle_request(
     model_dir: &std::path::Path,
     req: TtsRequest,
 ) {
-    let TtsRequest::Synthesize {
-        id,
-        text,
-        voice_id,
-        speed,
-    } = req;
-
-    let text_len = text.chars().count();
-    tracing::debug!(
-        event = "request_received",
-        id = id.as_str(),
-        voice_id = voice_id.as_str(),
-        speed = speed as f64,
-        text_len
-    );
-
-    let assets = match synthesis::resolve_model_assets(model_dir, &voice_id) {
-        Ok(assets) => assets,
-        Err(error) => {
-            let kind = classify_voice_error(&error);
-            let category = match kind {
-                ErrorKind::UnknownVoice => "unknown_voice",
-                _ => "invalid_request_payload",
-            };
-            tracing::warn!(
-                event = "request_rejected",
-                category,
+    match req {
+        TtsRequest::Ping { id } => {
+            tracing::trace!(event = "ping", id = %id);
+            let _ = send_response(&TtsResponse::Pong { id }, "pong");
+        }
+        TtsRequest::Synthesize {
+            id,
+            text,
+            voice_id,
+            speed,
+        } => {
+            let text_len = text.chars().count();
+            tracing::debug!(
+                event = "request_received",
                 id = id.as_str(),
                 voice_id = voice_id.as_str(),
-                detail = error.as_str()
+                speed = speed as f64,
+                text_len
             );
-            let _ = send_response(
-                &TtsResponse::Error {
-                    id: Some(id),
-                    kind,
-                    message: error,
-                },
-                "error",
-            );
-            return;
-        }
-    };
 
-    tracing::debug!(
-        event = "kokoro_assets_resolved",
-        id = id.as_str(),
-        voice_id = voice_id.as_str(),
-        lang_code = assets.voice.lang_code,
-        british = assets.voice.british
-    );
-
-    match synthesis_cache.synthesize(&text, &assets, speed) {
-        Ok(result) => {
-            let byte_len = (result.pcm16.len() * 2) as u32;
-
-            let stdout = io::stdout();
-            let mut out = stdout.lock();
-
-            let audio_json = serde_json::to_string(&TtsResponse::Audio {
-                id: id.clone(),
-                bytes: byte_len,
-                sample_rate: result.sample_rate,
-                channels: 1,
-            })
-            .expect("audio response serialization");
-            if let Err(error) = writeln!(out, "{audio_json}") {
-                tracing::error!(
-                    event = "stdout_write_failed",
-                    stage = "audio",
-                    error = error.to_string()
-                );
-                return;
-            }
-
-            for sample in &result.pcm16 {
-                if let Err(error) = out.write_all(&sample.to_le_bytes()) {
-                    tracing::error!(
-                        event = "stdout_write_failed",
-                        stage = "audio_bytes",
-                        error = error.to_string()
+            let assets = match synthesis::resolve_model_assets(model_dir, &voice_id) {
+                Ok(assets) => assets,
+                Err(error) => {
+                    let kind = classify_voice_error(&error);
+                    let category = match kind {
+                        ErrorKind::UnknownVoice => "unknown_voice",
+                        _ => "invalid_request_payload",
+                    };
+                    tracing::warn!(
+                        event = "request_rejected",
+                        category,
+                        id = id.as_str(),
+                        voice_id = voice_id.as_str(),
+                        detail = error.as_str()
+                    );
+                    let _ = send_response(
+                        &TtsResponse::Error {
+                            id: Some(id),
+                            kind,
+                            message: error,
+                        },
+                        "error",
                     );
                     return;
                 }
-            }
-
-            let done_json = serde_json::to_string(&TtsResponse::Done { id: id.clone() })
-                .expect("done response serialization");
-            if let Err(error) = writeln!(out, "{done_json}") {
-                tracing::error!(
-                    event = "stdout_write_failed",
-                    stage = "done",
-                    error = error.to_string()
-                );
-                return;
-            }
-            if let Err(error) = out.flush() {
-                tracing::error!(
-                    event = "stdout_flush_failed",
-                    stage = "done",
-                    error = error.to_string()
-                );
-                return;
-            }
+            };
 
             tracing::debug!(
-                event = "request_succeeded",
+                event = "kokoro_assets_resolved",
                 id = id.as_str(),
                 voice_id = voice_id.as_str(),
-                text_len,
-                sample_rate = result.sample_rate as u64,
-                byte_length = byte_len as u64
+                lang_code = assets.voice.lang_code,
+                british = assets.voice.british
             );
-        }
-        Err(error) => {
-            tracing::warn!(
-                event = "request_failed",
-                category = "synthesis_failed",
-                id = id.as_str(),
-                voice_id = voice_id.as_str(),
-                detail = error.as_str()
-            );
-            let _ = send_response(
-                &TtsResponse::Error {
-                    id: Some(id),
-                    kind: ErrorKind::SynthesisFailed,
-                    message: error,
-                },
-                "error",
-            );
+
+            match synthesis_cache.synthesize(&text, &assets, speed) {
+                Ok(result) => {
+                    let byte_len = (result.pcm16.len() * 2) as u32;
+
+                    let stdout = io::stdout();
+                    let mut out = stdout.lock();
+
+                    let audio_json = serde_json::to_string(&TtsResponse::Audio {
+                        id: id.clone(),
+                        bytes: byte_len,
+                        sample_rate: result.sample_rate,
+                        channels: 1,
+                    })
+                    .expect("audio response serialization");
+                    if let Err(error) = writeln!(out, "{audio_json}") {
+                        tracing::error!(
+                            event = "stdout_write_failed",
+                            stage = "audio",
+                            error = error.to_string()
+                        );
+                        return;
+                    }
+
+                    for sample in &result.pcm16 {
+                        if let Err(error) = out.write_all(&sample.to_le_bytes()) {
+                            tracing::error!(
+                                event = "stdout_write_failed",
+                                stage = "audio_bytes",
+                                error = error.to_string()
+                            );
+                            return;
+                        }
+                    }
+
+                    let done_json =
+                        serde_json::to_string(&TtsResponse::Done { id: id.clone() })
+                            .expect("done response serialization");
+                    if let Err(error) = writeln!(out, "{done_json}") {
+                        tracing::error!(
+                            event = "stdout_write_failed",
+                            stage = "done",
+                            error = error.to_string()
+                        );
+                        return;
+                    }
+                    if let Err(error) = out.flush() {
+                        tracing::error!(
+                            event = "stdout_flush_failed",
+                            stage = "done",
+                            error = error.to_string()
+                        );
+                        return;
+                    }
+
+                    tracing::debug!(
+                        event = "request_succeeded",
+                        id = id.as_str(),
+                        voice_id = voice_id.as_str(),
+                        text_len,
+                        sample_rate = result.sample_rate as u64,
+                        byte_length = byte_len as u64
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        event = "request_failed",
+                        category = "synthesis_failed",
+                        id = id.as_str(),
+                        voice_id = voice_id.as_str(),
+                        detail = error.as_str()
+                    );
+                    let _ = send_response(
+                        &TtsResponse::Error {
+                            id: Some(id),
+                            kind: ErrorKind::SynthesisFailed,
+                            message: error,
+                        },
+                        "error",
+                    );
+                }
+            }
         }
     }
 }
@@ -602,7 +609,14 @@ mod tests {
                 assert_eq!(id, "r1");
                 assert_eq!(voice_id, "af_heart");
             }
+            _ => panic!("expected Synthesize variant"),
         }
+    }
+
+    #[test]
+    fn parse_request_accepts_ping() {
+        let req = parse_request(r#"{"op":"ping","id":"h1"}"#).expect("should parse");
+        assert!(matches!(req, TtsRequest::Ping { id } if id == "h1"));
     }
 
     #[test]
