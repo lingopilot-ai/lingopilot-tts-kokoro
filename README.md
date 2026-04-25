@@ -199,14 +199,15 @@ If startup validation fails:
 - Requests are decoded with strict field checking. Unknown fields are rejected.
 - Closing `stdin` terminates the process cleanly.
 
-### Request Schema
+### Request Schema — `synthesize`
 
 | Field | Type | Required | Contract |
 |-------|------|----------|----------|
+| `op` | string | yes | Must be `"synthesize"`. |
+| `id` | string | yes | Client-chosen correlation id. 1 to 128 bytes. |
 | `text` | string | yes | Text to synthesize. Must contain at least one non-whitespace character and be at most `8192` Unicode scalar values. |
-| `voice` | string | yes | Kokoro voice ID such as `af_heart` or `bf_emma`. |
+| `voice_id` | string | yes | Kokoro voice ID such as `af_heart` or `bf_emma`. |
 | `speed` | number | no | Speed multiplier. Defaults to `1.0`. Must be finite and between `0.5` and `2.0` inclusive. |
-| `model_dir` | string | yes | Absolute path to an existing directory that contains exactly one Kokoro `.onnx` file and exactly one `voices*.bin` bundle. |
 
 Additional request rules:
 
@@ -215,15 +216,52 @@ Additional request rules:
 - Bundle resolution is strict. If `model_dir` does not contain exactly one `.onnx` file and exactly one `voices*.bin` file, the sidecar returns an `error` response.
 - The sidecar does not implicitly search for `kokoro-model/` relative to the executable. The host must still pass an absolute `model_dir`.
 
+### Request Schema — `ping`
+
+| Field | Type | Required | Contract |
+|-------|------|----------|----------|
+| `op` | string | yes | Must be `"ping"`. |
+| `id` | string | yes | Client-chosen correlation id. 1 to 128 bytes. Echoed byte-for-byte in the `pong` response. |
+
+`ping` is a base-protocol health-check op available from `v0.1.4`. It is not listed in the `ops` array of the `ready` response and must never appear in a negotiated capability list. No extra fields are accepted. An empty or oversize `id` returns an `error` response with `kind:"bad_request"`; the process stays alive.
+
+### Health Check (`op:ping` / `op:pong`)
+
+Available since `v0.1.4`. The host sends a `ping` request; the sidecar replies with a `pong` response that echoes the `id` byte-for-byte. The exchange proves the sidecar process is alive and reading `stdin` without touching the synthesis path, the ONNX session, the voice cache, or eSpeak.
+
+**Wire shape (locked):**
+
+Request:
+
+```json
+{"op":"ping","id":"<correlation-id>"}
+```
+
+Response:
+
+```json
+{"op":"pong","id":"<correlation-id>"}
+```
+
+**`id` rules:** required, non-empty, at most 128 bytes, echoed verbatim.
+
+**Floor version:** hosts must gate `HealthStrategy::Ping` on `ready.version >= "0.1.4"` for this sidecar.
+
+**Ordering invariant:** `pong` is never emitted between an `audio` line and its corresponding `done` line. The single-threaded serial stdin loop structurally guarantees this. See `docs/adr-health-ping.md` §6.1 for the invariant and guidance for any future concurrent-dispatch migration.
+
+**Discovery:** `ping` is a base-protocol op. It does not appear in the `ops` array of the `ready` response and answers "process alive", not "worker idle".
+
 ### Response Framing
 
 The sidecar writes exactly one newline-delimited JSON object per response on `stdout`.
 
-| Type | Fields | Contract |
+| `op` | Fields | Contract |
 |------|--------|----------|
-| `ready` | `version` | Emitted exactly once after successful startup. No binary data follows. |
-| `audio` | `byte_length`, `sample_rate`, `channels` | Successful synthesis header. Immediately after the newline, exactly `byte_length` raw PCM bytes follow on `stdout`. |
-| `error` | `message` | Error response. JSON only; no audio bytes follow. The process stays alive for later requests unless `stdin` is closed. |
+| `ready` | `version`, `sample_rate`, `channels`, `encoding` | Emitted exactly once after successful startup. No binary data follows. |
+| `audio` | `id`, `bytes`, `sample_rate`, `channels` | Successful synthesis header. Immediately after the newline, exactly `bytes` raw PCM bytes follow on `stdout`. |
+| `done` | `id` | Emitted after the PCM payload for a `synthesize` request. |
+| `pong` | `id` | Health-check response. Echoes the `id` from the corresponding `ping` request. JSON only; no binary data follows. Available from `v0.1.4`. |
+| `error` | `id`, `kind`, `message` | Error response. JSON only; no audio bytes follow. The process stays alive for later requests unless `stdin` is closed. |
 
 Audio format:
 
